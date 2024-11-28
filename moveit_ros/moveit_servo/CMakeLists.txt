@@ -15,6 +15,9 @@ set(SERVO_PARAM_LIB_NAME ${SERVO_LIB_NAME}_parameters)
 # Pose Tracking
 set(POSE_TRACKING pose_tracking)
 
+# Slave Following
+set(FOLLOW follow)
+
 # Component Nodes (Shared libraries) ############################
 set(SERVO_COMPONENT_NODE servo_node)
 set(SERVO_CONTROLLER_INPUT servo_controller_input)
@@ -23,6 +26,7 @@ set(SERVO_CONTROLLER_INPUT servo_controller_input)
 set(SERVO_NODE_MAIN_NAME servo_node_main)
 set(POSE_TRACKING_DEMO_NAME servo_pose_tracking_demo)
 set(FAKE_SERVO_CMDS_NAME fake_command_publisher)
+set(FOLLOW_DEMO_NAME follow_demo)
 
 #################################################################
 
@@ -87,6 +91,10 @@ add_library(${POSE_TRACKING} SHARED src/pose_tracking.cpp)
 ament_target_dependencies(${POSE_TRACKING} ${THIS_PACKAGE_INCLUDE_DEPENDS})
 target_link_libraries(${POSE_TRACKING} ${SERVO_LIB_NAME})
 
+add_library(${FOLLOW} SHARED src/follow.cpp)
+ament_target_dependencies(${FOLLOW} ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_link_libraries(${FOLLOW} ${SERVO_LIB_NAME})
+
 #####################
 ## Component Nodes ##
 #####################
@@ -116,6 +124,11 @@ add_executable(${POSE_TRACKING_DEMO_NAME} src/cpp_interface_demo/pose_tracking_d
 target_link_libraries(${POSE_TRACKING_DEMO_NAME} ${POSE_TRACKING})
 ament_target_dependencies(${POSE_TRACKING_DEMO_NAME} ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
+# An example of pose tracking
+add_executable(${FOLLOW_DEMO_NAME} src/cpp_interface_demo/follow_demo.cpp)
+target_link_libraries(${FOLLOW_DEMO_NAME} ${FOLLOW})
+ament_target_dependencies(${FOLLOW_DEMO_NAME} ${THIS_PACKAGE_INCLUDE_DEPENDS})
+
 # Add executable to publish fake servo commands for testing/demo purposes
 add_executable(${FAKE_SERVO_CMDS_NAME} test/publish_fake_jog_commands.cpp)
 ament_target_dependencies(${FAKE_SERVO_CMDS_NAME}
@@ -134,6 +147,7 @@ install(
     ${SERVO_LIB_NAME}
     ${SERVO_LIB_NAME}_parameters
     ${POSE_TRACKING}
+    ${FOLLOW}
     ${SERVO_COMPONENT_NODE}
     ${SERVO_CONTROLLER_INPUT}
   EXPORT export_${PROJECT_NAME}
@@ -149,6 +163,7 @@ install(
     ${SERVO_NODE_MAIN_NAME}
     ${CPP_DEMO_NAME}
     ${POSE_TRACKING_DEMO_NAME}
+    ${FOLLOW_DEMO_NAME}
     ${FAKE_SERVO_CMDS_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
