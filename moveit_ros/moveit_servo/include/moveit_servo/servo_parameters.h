@@ -64,7 +64,7 @@ struct ServoParameters
   // Properties of incoming commands
   std::string cartesian_command_in_topic{ "~/delta_twist_cmds" };
   std::string joint_command_in_topic{ "~/delta_joint_cmds" };
-  std::string robot_link_command_frame{ "panda_link0" };
+  std::string robot_link_command_frame{ "left_panda_link0" };
   std::string command_in_type{ "unitless" };
   double linear_scale{ 0.4 };
   double rotational_scale{ 0.8 };
@@ -72,7 +72,7 @@ struct ServoParameters
   // Properties of Servo calculations
   double override_velocity_scaling_factor{ 0.0 };
   // Properties of outgoing commands
-  std::string command_out_topic{ "/panda_arm_controller/joint_trajectory" };
+  std::string command_out_topic{ "/left_arm_controller/joint_trajectory" };
   double publish_period{ 0.034 };
   std::string command_out_type{ "trajectory_msgs/JointTrajectory" };
   bool publish_joint_positions{ true };
@@ -82,13 +82,15 @@ struct ServoParameters
   std::string joint_topic{ "/joint_states" };
   std::string smoothing_filter_plugin_name{ "online_signal_smoothing::ButterworthFilterPlugin" };
   // MoveIt properties
-  std::string move_group_name{ "panda_arm" };
-  std::string planning_frame{ "panda_link0" };
-  std::string ee_frame_name{ "panda_link8" };
+  std::string move_group_name{ "left_panda_arm" };
+  std::string planning_frame{ "left_panda_link0" };
+  std::string ee_frame_name{ "left_panda_link8" };
   bool is_primary_planning_scene_monitor = { true };
   std::string monitored_planning_scene_topic{
     planning_scene_monitor::PlanningSceneMonitor::DEFAULT_PLANNING_SCENE_TOPIC
   };
+  // Servoing properties
+  std::string leading_ee_frame{ "right_panda_hand" };
   // Stopping behaviour
   double incoming_command_timeout{ 0.1 };
   int num_outgoing_halt_msgs_to_publish{ 4 };
