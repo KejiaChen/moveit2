@@ -38,6 +38,8 @@
 
 #include <std_msgs/msg/int8.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_ros/buffer.h>
 
 #include <moveit_servo/servo.h>
 #include <moveit_servo/follow.h>
@@ -123,6 +125,10 @@ int main(int argc, char** argv)
     exit(EXIT_FAILURE);
   }
 
+  // TF listener
+  tf2_ros::Buffer tf_buffer(node->get_clock());
+  tf2_ros::TransformListener tf_listener(tf_buffer);
+
   // Create the pose tracker
   moveit_servo::Follow tracker(node, servo_parameters, planning_scene_monitor);
 
@@ -136,12 +142,13 @@ int main(int argc, char** argv)
   Eigen::Vector3d lin_tol{ 0.001, 0.001, 0.001 };
   double rot_tol = 0.01;
 
-  // Get the current EE transform
+  // // Get the current EE transform
   geometry_msgs::msg::TransformStamped current_ee_tf;
   tracker.getCommandFrameTransform(current_ee_tf);
 
   // Convert it to a Pose
   geometry_msgs::msg::PoseStamped target_pose;
+
   target_pose.header.frame_id = current_ee_tf.header.frame_id;
   target_pose.pose.position.x = current_ee_tf.transform.translation.x;
   target_pose.pose.position.y = current_ee_tf.transform.translation.y;
@@ -168,14 +175,49 @@ int main(int argc, char** argv)
   });
 
   rclcpp::WallRate loop_rate(50);
-  for (size_t i = 0; i < 500; ++i)
-  {
-    // Modify the pose target a little bit each cycle
-    // This is a dynamic pose target
-    target_pose.pose.position.z += 0.0004;
-    target_pose.header.stamp = node->now();
-    target_pose_pub->publish(target_pose);
 
+  // for (size_t i = 0; i < 500; ++i)
+  // {
+  //   // Modify the pose target a little bit each cycle
+  //   // This is a dynamic pose target
+  //   target_pose.pose.position.z += 0.0004;
+  //   target_pose.header.stamp = node->now();
+  //   target_pose_pub->publish(target_pose);
+
+  //   loop_rate.sleep();
+  // }
+
+  geometry_msgs::msg::TransformStamped transform_stamped;
+  while ((rclcpp::ok)) {
+    try {
+      // Get the transform from master's EE to follower's base
+      // transform_stamped = tf_buffer.lookupTransform(servo_parameters->planning_frame, servo_parameters->leading_ee_frame, tf2::TimePointZero);
+      // // Target in follower's base frame
+      // target_pose.header.frame_id = transform_stamped.header.frame_id;
+      // target_pose.pose.position.x = transform_stamped.transform.translation.x;
+      // target_pose.pose.position.y = transform_stamped.transform.translation.y - 0.3;
+      // target_pose.pose.position.z = transform_stamped.transform.translation.z;
+      // target_pose.pose.orientation = transform_stamped.transform.rotation;
+
+      // Get the target in master's EE frame
+      target_pose.header.frame_id = servo_parameters->leading_ee_frame;
+      target_pose.pose.position.x = 0.0;
+      target_pose.pose.position.y = 0.3;
+      target_pose.pose.position.z = 0.0;
+      target_pose.pose.orientation.x = 0.0;
+      target_pose.pose.orientation.y = 0.0; 
+      target_pose.pose.orientation.z = 0.0;
+      target_pose.pose.orientation.w = 1.0;
+
+      // Publish target pose
+      target_pose.header.stamp = node->now();
+      target_pose_pub->publish(target_pose);
+    }
+    catch (tf2::TransformException &ex) {
+      RCLCPP_ERROR_STREAM(LOGGER, "Could not get transform: " << ex.what());
+    }
+    
+    // Add a small sleep to prevent busy-waiting
     loop_rate.sleep();
   }
 

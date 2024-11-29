@@ -138,11 +138,11 @@ FollowStatusCode Follow::moveToPose(const Eigen::Vector3d& positional_tolerance,
   // - Another thread requested a stop
   while (rclcpp::ok())
   {
-    if (satisfiesPoseTolerance(positional_tolerance, angular_tolerance))
-    {
-      RCLCPP_INFO_STREAM(LOGGER, "The target pose is achieved!");
-      break;
-    }
+    // if (satisfiesPoseTolerance(positional_tolerance, angular_tolerance))
+    // {
+    //   RCLCPP_INFO_STREAM(LOGGER, "The target pose is achieved!");
+    //   break;
+    // }
     // Attempt to update robot pose
     if (servo_->getCommandFrameTransform(command_frame_transform_))
     {
