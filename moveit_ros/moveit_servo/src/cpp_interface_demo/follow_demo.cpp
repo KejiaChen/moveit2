@@ -47,8 +47,25 @@
 #include <moveit_servo/servo_parameters.h>
 #include <moveit_servo/make_shared_from_pool.h>
 #include <thread>
+#include <std_msgs/msg/bool.hpp>
+#include <atomic>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_servo.follow_demo");
+std::atomic<bool> start_tracking(false);  // Shared variable to indicate tracking state
+
+// Callback for start tracking signal
+void startSignalCallback(const std_msgs::msg::Bool::ConstSharedPtr msg)
+{
+  start_tracking.store(msg->data);  // Update tracking state
+  if (msg->data)
+  {
+    RCLCPP_INFO(LOGGER, "Start signal received. Tracking started.");
+  }
+  else
+  {
+    RCLCPP_INFO(LOGGER, "Stop signal received. Tracking stopped.");
+  }
+}
 
 // Class for monitoring status of moveit_servo
 class StatusMonitor
@@ -87,6 +104,8 @@ int main(int argc, char** argv)
 {
   rclcpp::init(argc, argv);
   rclcpp::Node::SharedPtr node = rclcpp::Node::make_shared("follow_demo");
+  // Add a subscription for the start signal
+  auto start_signal_sub = node->create_subscription<std_msgs::msg::Bool>("/start_tracking", rclcpp::SystemDefaultsQoS(), startSignalCallback);
 
   rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(node);
@@ -174,7 +193,7 @@ int main(int argc, char** argv)
                                    << moveit_servo::FOLLOW_STATUS_CODE_MAP.at(follow_status));
   });
 
-  rclcpp::WallRate loop_rate(50);
+  rclcpp::WallRate loop_rate(100);
 
   // for (size_t i = 0; i < 500; ++i)
   // {
@@ -189,32 +208,40 @@ int main(int argc, char** argv)
 
   geometry_msgs::msg::TransformStamped transform_stamped;
   while ((rclcpp::ok)) {
-    try {
-      // Get the transform from master's EE to follower's base
-      // transform_stamped = tf_buffer.lookupTransform(servo_parameters->planning_frame, servo_parameters->leading_ee_frame, tf2::TimePointZero);
-      // // Target in follower's base frame
-      // target_pose.header.frame_id = transform_stamped.header.frame_id;
-      // target_pose.pose.position.x = transform_stamped.transform.translation.x;
-      // target_pose.pose.position.y = transform_stamped.transform.translation.y - 0.3;
-      // target_pose.pose.position.z = transform_stamped.transform.translation.z;
-      // target_pose.pose.orientation = transform_stamped.transform.rotation;
+    if (start_tracking.load())
+    {
+      try {
+        // Get the transform from master's EE to follower's base
+        // transform_stamped = tf_buffer.lookupTransform(servo_parameters->planning_frame, servo_parameters->leading_ee_frame, tf2::TimePointZero);
+        // // Target in follower's base frame
+        // target_pose.header.frame_id = transform_stamped.header.frame_id;
+        // target_pose.pose.position.x = transform_stamped.transform.translation.x;
+        // target_pose.pose.position.y = transform_stamped.transform.translation.y - 0.3;
+        // target_pose.pose.position.z = transform_stamped.transform.translation.z;
+        // target_pose.pose.orientation = transform_stamped.transform.rotation;
 
-      // Get the target in master's EE frame
-      target_pose.header.frame_id = servo_parameters->leading_ee_frame;
-      target_pose.pose.position.x = 0.0;
-      target_pose.pose.position.y = 0.3;
-      target_pose.pose.position.z = 0.0;
-      target_pose.pose.orientation.x = 0.0;
-      target_pose.pose.orientation.y = 0.0; 
-      target_pose.pose.orientation.z = 0.0;
-      target_pose.pose.orientation.w = 1.0;
+        // Get the target in master's EE frame
+        target_pose.header.frame_id = servo_parameters->leading_ee_frame;
+        target_pose.pose.position.x = -0.15;
+        target_pose.pose.position.y = 0.0;
+        target_pose.pose.position.z = 0.0;
+        target_pose.pose.orientation.x = 0.0;
+        target_pose.pose.orientation.y = 0.0; 
+        target_pose.pose.orientation.z = 0.0;
+        target_pose.pose.orientation.w = 1.0;
 
-      // Publish target pose
-      target_pose.header.stamp = node->now();
-      target_pose_pub->publish(target_pose);
+        // Publish target pose
+        target_pose.header.stamp = node->now();
+        target_pose_pub->publish(target_pose);
+      }
+      catch (tf2::TransformException &ex) {
+        RCLCPP_ERROR_STREAM(LOGGER, "Could not get transform: " << ex.what());
+      }
     }
-    catch (tf2::TransformException &ex) {
-      RCLCPP_ERROR_STREAM(LOGGER, "Could not get transform: " << ex.what());
+    else
+    {
+      auto clock = node->get_clock();
+      RCLCPP_INFO_THROTTLE(LOGGER, *clock, 2000, "Waiting for start signal...");
     }
     
     // Add a small sleep to prevent busy-waiting
