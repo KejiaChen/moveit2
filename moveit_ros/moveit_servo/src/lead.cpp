@@ -42,7 +42,7 @@ namespace
 {
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_servo.lead");
 constexpr size_t LOG_THROTTLE_PERIOD = 10;  // sec
-constexpr size_t MAX_QUEUE_SIZE = 5;   
+constexpr size_t MAX_QUEUE_SIZE = 10;   
 
 // Helper template for declaring and getting ros param
 template <typename T>
@@ -91,8 +91,13 @@ Lead::Lead(const rclcpp::Node::SharedPtr& node, const ServoParameters::SharedCon
   servo_->start();
 
   // Connect to MTC ROS interfaces
+  rclcpp::QoS qos_profile = rclcpp::QoS(rclcpp::KeepAll())
+                                .reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE) // Ensure reliability
+                                .durability(RMW_QOS_POLICY_DURABILITY_VOLATILE)   // Volatile durability
+                                .history(RMW_QOS_POLICY_HISTORY_KEEP_ALL);         // Keep all messages
   target_traj_sub_ = node_->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-      "target_joint_trajectory", rclcpp::SystemDefaultsQoS(),
+      // "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
+      "/mtc_joint_trajectory", qos_profile,
       [this](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryCallback(msg); });
 
   // Publish outgoing joint commands to the Servo object
@@ -100,8 +105,8 @@ Lead::Lead(const rclcpp::Node::SharedPtr& node, const ServoParameters::SharedCon
       servo_->getParameters()->joint_command_in_topic, rclcpp::SystemDefaultsQoS());
 
   // Subscribe to velocity scale
-   velocity_scale_sub_ = node_->create_subscription<std_msgs::msg::Float64>(
-        "/velocity_scale", 10, std::bind(&Lead::velocityScaleCallback, this, std::placeholders::_1));
+  //  velocity_scale_sub_ = node_->create_subscription<std_msgs::msg::Float64>(
+  //       "/velocity_scale", 10, std::bind(&Lead::velocityScaleCallback, this, std::placeholders::_1));
 }
 
 // Process a queue of trajectories
@@ -119,11 +124,10 @@ LeadStatusCode Lead::processTrajectory(){
         trajectory_queue_.pop();
       }
     }
-
     // If no trajectory is available, wait and retry
     if (trajectory.points.empty())
     {
-      RCLCPP_INFO(LOGGER, "No trajectories in queue. Waiting for input...");
+      // RCLCPP_INFO(LOGGER, "No trajectories in queue. Waiting for input...");
       rclcpp::sleep_for(std::chrono::milliseconds(100));
       continue;
     }
@@ -152,6 +156,7 @@ LeadStatusCode Lead::executeTrajectory(const trajectory_msgs::msg::JointTrajecto
     const auto& current_point = trajectory.points[i];
     const auto& next_point = trajectory.points[i + 1];
     executeTrajectorySegment(current_point, next_point, trajectory.joint_names);
+    // RCLCPP_INFO(LOGGER, "Executing trajectory segment %zu of %zu.", i + 1, trajectory.points.size() - 1);
 }
 
 if (stop_requested_)
@@ -206,7 +211,8 @@ void Lead::executeTrajectorySegment(const trajectory_msgs::msg::JointTrajectoryP
 
     // Check if the segment duration is complete
     if ((node_->now() - segment_start_time).seconds() >= scaled_time_diff)
-    {
+    {   
+        RCLCPP_INFO(LOGGER, "Segment duration complete. Breaking the loop...");
         break;
     }
 }
@@ -252,32 +258,8 @@ void Lead::readROSParams()
   double publish_period;
   declareOrGetParam(publish_period, ns + ".publish_period", node_, LOGGER);
 
-  // x_pid_config_.dt = publish_period;
-  // y_pid_config_.dt = publish_period;
-  // z_pid_config_.dt = publish_period;
-  // angular_pid_config_.dt = publish_period;
-
   double windup_limit;
   declareOrGetParam(windup_limit, ns + ".windup_limit", node_, LOGGER);
-  // x_pid_config_.windup_limit = windup_limit;
-  // y_pid_config_.windup_limit = windup_limit;
-  // z_pid_config_.windup_limit = windup_limit;
-  // angular_pid_config_.windup_limit = windup_limit;
-
-  // declareOrGetParam(x_pid_config_.k_p, ns + ".x_proportional_gain", node_, LOGGER);
-  // declareOrGetParam(x_pid_config_.k_p, ns + ".x_proportional_gain", node_, LOGGER);
-  // declareOrGetParam(y_pid_config_.k_p, ns + ".y_proportional_gain", node_, LOGGER);
-  // declareOrGetParam(z_pid_config_.k_p, ns + ".z_proportional_gain", node_, LOGGER);
-  // declareOrGetParam(x_pid_config_.k_i, ns + ".x_integral_gain", node_, LOGGER);
-  // declareOrGetParam(y_pid_config_.k_i, ns + ".y_integral_gain", node_, LOGGER);
-  // declareOrGetParam(z_pid_config_.k_i, ns + ".z_integral_gain", node_, LOGGER);
-  // declareOrGetParam(x_pid_config_.k_d, ns + ".x_derivative_gain", node_, LOGGER);
-  // declareOrGetParam(y_pid_config_.k_d, ns + ".y_derivative_gain", node_, LOGGER);
-  // declareOrGetParam(z_pid_config_.k_d, ns + ".z_derivative_gain", node_, LOGGER);
-
-  // declareOrGetParam(angular_pid_config_.k_p, ns + ".angular_proportional_gain", node_, LOGGER);
-  // declareOrGetParam(angular_pid_config_.k_i, ns + ".angular_integral_gain", node_, LOGGER);
-  // declareOrGetParam(angular_pid_config_.k_d, ns + ".angular_derivative_gain", node_, LOGGER);
 }
 
 void Lead::targetJointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg)

@@ -17,6 +17,7 @@ set(POSE_TRACKING pose_tracking)
 
 # Slave Following
 set(FOLLOW follow)
+set(LEAD lead)
 
 # Component Nodes (Shared libraries) ############################
 set(SERVO_COMPONENT_NODE servo_node)
@@ -27,6 +28,7 @@ set(SERVO_NODE_MAIN_NAME servo_node_main)
 set(POSE_TRACKING_DEMO_NAME servo_pose_tracking_demo)
 set(FAKE_SERVO_CMDS_NAME fake_command_publisher)
 set(FOLLOW_DEMO_NAME follow_demo)
+set(LEAD_DEMO_NAME lead_demo)
 
 #################################################################
 
@@ -95,6 +97,10 @@ add_library(${FOLLOW} SHARED src/follow.cpp)
 ament_target_dependencies(${FOLLOW} ${THIS_PACKAGE_INCLUDE_DEPENDS})
 target_link_libraries(${FOLLOW} ${SERVO_LIB_NAME})
 
+add_library(${LEAD} SHARED src/lead.cpp)
+ament_target_dependencies(${LEAD} ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_link_libraries(${LEAD} ${SERVO_LIB_NAME})
+
 #####################
 ## Component Nodes ##
 #####################
@@ -129,6 +135,11 @@ add_executable(${FOLLOW_DEMO_NAME} src/cpp_interface_demo/follow_demo.cpp)
 target_link_libraries(${FOLLOW_DEMO_NAME} ${FOLLOW})
 ament_target_dependencies(${FOLLOW_DEMO_NAME} ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
+# An example of pose tracking
+add_executable(${LEAD_DEMO_NAME} src/cpp_interface_demo/lead_demo.cpp)
+target_link_libraries(${LEAD_DEMO_NAME} ${LEAD})
+ament_target_dependencies(${LEAD_DEMO_NAME} ${THIS_PACKAGE_INCLUDE_DEPENDS})
+
 # Add executable to publish fake servo commands for testing/demo purposes
 add_executable(${FAKE_SERVO_CMDS_NAME} test/publish_fake_jog_commands.cpp)
 ament_target_dependencies(${FAKE_SERVO_CMDS_NAME}
@@ -148,6 +159,7 @@ install(
     ${SERVO_LIB_NAME}_parameters
     ${POSE_TRACKING}
     ${FOLLOW}
+    ${LEAD}
     ${SERVO_COMPONENT_NODE}
     ${SERVO_CONTROLLER_INPUT}
   EXPORT export_${PROJECT_NAME}
@@ -164,6 +176,7 @@ install(
     ${CPP_DEMO_NAME}
     ${POSE_TRACKING_DEMO_NAME}
     ${FOLLOW_DEMO_NAME}
+    ${LEAD_DEMO_NAME}
     ${FAKE_SERVO_CMDS_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
