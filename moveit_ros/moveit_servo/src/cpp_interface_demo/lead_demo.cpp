@@ -49,10 +49,17 @@
 #include <thread>
 #include <std_msgs/msg/bool.hpp>
 #include <atomic>
+#include <condition_variable>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_servo.lead_demo");
 std::atomic<bool> start_tracking(false);  // Shared variable to indicate tracking state
 constexpr size_t MAX_QUEUE_SIZE = 10; 
+
+// Shared flag to indicate waypoint completion
+std::atomic<bool> waypoint_reached(false);
+std::mutex cv_mutex;
+std::condition_variable cv;
+
 
 // Class for monitoring status of moveit_servo
 class StatusMonitor
@@ -95,6 +102,16 @@ void targetJointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::
     RCLCPP_INFO(LOGGER, "Received new trajectory with %zu waypoints.", msg->points.size());
 }
 
+// Callback function to update waypoint status
+void waypointReachedCallback(const std_msgs::msg::Bool::ConstSharedPtr& msg)
+{
+    if (msg->data)
+    {
+        waypoint_reached = true;
+        cv.notify_one(); // Notify waiting threads
+    }
+}
+
 /**
  * Instantiate the pose tracking interface.
  * Send a pose slightly different from the starting pose
@@ -117,6 +134,10 @@ int main(int argc, char** argv)
       // "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
       "mtc_joint_trajectory", qos_profile,
       [&queue_mutex, &trajectory_queue](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryCallback(msg, queue_mutex, trajectory_queue); });
+
+  // Subscription for waypoint confirmation
+  auto waypoint_status_sub = node->create_subscription<std_msgs::msg::Bool>(
+      "waypoint_reached", rclcpp::SystemDefaultsQoS(), waypointReachedCallback);
 
   auto target_joint_pub = node->create_publisher<trajectory_msgs::msg::JointTrajectoryPoint>("target_joint", rclcpp::SystemDefaultsQoS());
 
@@ -210,16 +231,23 @@ int main(int argc, char** argv)
             const auto& current_point = trajectory.points[point_index];
             const auto& next_point = trajectory.points[point_index + 1];
 
-            // Publish the trajectory segment to tracker
-            RCLCPP_INFO(LOGGER, "NEXT POINT POSITION: %f, %f, %f",
-                        next_point.positions[0], next_point.positions[1], next_point.positions[2]);
+            // Reset the waypoint_reached flag
+            waypoint_reached = false;
+
             // tracker.executeTrajectorySegment(current_point, next_point, trajectory.joint_names);
             target_joint_pub->publish(next_point);
-            RCLCPP_INFO(LOGGER, "Published next joint position: %f, %f, %f",
+            RCLCPP_INFO(LOGGER, "Process point %zu", point_index);
+            if (next_point.positions.size() == 7) {
+                RCLCPP_INFO(LOGGER, "Published next joint position: %f, %f, %f, %f, %f, %f, %f",
                         next_point.positions[0], next_point.positions[1], next_point.positions[2], 
                         next_point.positions[3], next_point.positions[4], next_point.positions[5], next_point.positions[6]);
+            }
+          
+            // Wait for waypoint confirmation
+            std::unique_lock<std::mutex> lock(cv_mutex);
+            cv.wait(lock, [] { return waypoint_reached.load(); });
 
-            ++point_index; // Move to the next point
+            point_index = point_index + 1; // Move to the next point
         } else {
             // Finished processing this trajectory
             RCLCPP_INFO(LOGGER, "Finished executing trajectory.");
@@ -232,8 +260,8 @@ int main(int argc, char** argv)
         RCLCPP_INFO_THROTTLE(LOGGER, *clock, 2000, "Waiting for trajectories...");
     }
         
-        // Add a small sleep to prevent busy-waiting
-    loop_rate.sleep();
+    // // Add a small sleep to prevent busy-waiting
+    // loop_rate.sleep();
 }
 
   // Make sure the tracker is stopped and clean up

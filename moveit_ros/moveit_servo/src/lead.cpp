@@ -34,6 +34,7 @@
 
 #include <moveit_servo/lead.h>
 #include <moveit_servo/servo_parameters.h>
+#include <moveit/robot_state/robot_state.h>
 
 #include <chrono>
 using namespace std::literals;
@@ -47,7 +48,7 @@ constexpr size_t MAX_QUEUE_SIZE = 10;
 // Helper template for declaring and getting ros param
 template <typename T>
 void declareOrGetParam(T& output_value, const std::string& param_name, const rclcpp::Node::SharedPtr& node,
-                       const rclcpp::Logger& logger, const T default_value = T{})
+                       const rclcpp::Logger& LOGGER, const T default_value = T{})
 {
   try
   {
@@ -62,12 +63,12 @@ void declareOrGetParam(T& output_value, const std::string& param_name, const rcl
   }
   catch (const rclcpp::exceptions::InvalidParameterTypeException& e)
   {
-    RCLCPP_WARN_STREAM(logger, "InvalidParameterTypeException(" << param_name << "): " << e.what());
-    RCLCPP_ERROR_STREAM(logger, "Error getting parameter \'" << param_name << "\', check parameter type in YAML file");
+    RCLCPP_WARN_STREAM(LOGGER, "InvalidParameterTypeException(" << param_name << "): " << e.what());
+    RCLCPP_ERROR_STREAM(LOGGER, "Error getting parameter \'" << param_name << "\', check parameter type in YAML file");
     throw e;
   }
 
-  RCLCPP_INFO_STREAM(logger, "Found parameter - " << param_name << ": " << output_value);
+  RCLCPP_INFO_STREAM(LOGGER, "Found parameter - " << param_name << ": " << output_value);
 }
 }  // namespace
 
@@ -98,6 +99,10 @@ Lead::Lead(const rclcpp::Node::SharedPtr& node, const ServoParameters::SharedCon
   // Publish outgoing joint commands to the Servo object
   joint_command_pub_ = node_->create_publisher<control_msgs::msg::JointJog>(
       servo_->getParameters()->joint_command_in_topic, rclcpp::SystemDefaultsQoS());
+
+  // Publish the signal of reaching the waypoint
+  waypoint_reached_pub_ = node_->create_publisher<std_msgs::msg::Bool>(
+      "waypoint_reached", rclcpp::SystemDefaultsQoS());
 
   // Subscribe to velocity scale
   //  velocity_scale_sub_ = node_->create_subscription<std_msgs::msg::Float64>(
@@ -152,6 +157,18 @@ LeadStatusCode Lead::moveToJoint(const double target_joint_timeout)
 
   while (rclcpp::ok())
   {
+    // Get the current joint values
+    auto current_joint = getCurrentJointValues(move_group_name_);
+
+    // check if this waypoint is reached
+    if (satisfiesJointTolerance(current_joint, 0.01))
+    {
+      RCLCPP_INFO_STREAM(LOGGER, "The target joint is achieved!");
+      std_msgs::msg::Bool msg;
+      msg.data = true;
+      waypoint_reached_pub_->publish(msg);
+    }
+
     // Fetch the latest velocity scale
     // double velocity_scale = getVelocityScale();
     double velocity_scale = 1.0;
@@ -257,6 +274,63 @@ void Lead::readROSParams()
 
   double windup_limit;
   declareOrGetParam(windup_limit, ns + ".windup_limit", node_, LOGGER);
+}
+
+std::vector<double> Lead::getCurrentJointValues(const std::string& group_name)
+{
+    // Ensure the PlanningSceneMonitor is initialized and running
+    if (!planning_scene_monitor_ || !planning_scene_monitor_->getStateMonitor())
+    {
+        RCLCPP_ERROR(LOGGER, "PlanningSceneMonitor or StateMonitor is not initialized.");
+        return {};
+    }
+    // Get the current robot state
+    auto current_state = planning_scene_monitor_->getStateMonitor()->getCurrentState();
+    if (!current_state)
+    {
+        RCLCPP_ERROR(LOGGER, "Failed to retrieve the current robot state.");
+        return {};
+    }
+
+    // Get the joint model group for the specified group name
+    const moveit::core::JointModelGroup* joint_model_group = current_state->getJointModelGroup(group_name);
+    if (!joint_model_group)
+    {
+        RCLCPP_ERROR(LOGGER, "Joint group '%s' not found.", group_name.c_str());
+        return {};
+    }
+
+    // Retrieve the current joint values
+    std::vector<double> joint_values;
+    current_state->copyJointGroupPositions(joint_model_group, joint_values);
+    return joint_values;
+}
+
+
+bool Lead::satisfiesJointTolerance(const std::vector<double>& joint_values, const double tolerance)
+{
+  std::lock_guard<std::mutex> lock(target_joint_mtx_);
+  if (!target_joint_available_)
+  {
+    RCLCPP_ERROR_STREAM(LOGGER, "No target joint available to compare to");
+    return false;
+  }
+
+  if (joint_values.size() != target_joint_.positions.size())
+  {
+    RCLCPP_ERROR_STREAM(LOGGER, "Joint values size does not match target joint size");
+    return false;
+  }
+
+  for (size_t i = 0; i < joint_values.size(); ++i)
+  {
+    if (std::abs(joint_values[i] - target_joint_.positions[i]) > tolerance)
+    {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 void Lead::targetJointCallback(const trajectory_msgs::msg::JointTrajectoryPoint::ConstSharedPtr& msg)

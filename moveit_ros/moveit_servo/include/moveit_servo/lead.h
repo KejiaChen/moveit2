@@ -52,6 +52,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/transform_listener.h>
 #include <Eigen/Geometry>
+#include <std_msgs/msg/bool.hpp>
 
 // Conventions:
 // Calculations are done in the planning_frame_ unless otherwise noted.
@@ -120,6 +121,12 @@ private:
   /** Initialize ROS parameters */
   void readROSParams();
 
+  /** Check if the joint values are within tolerance of the target joint */
+  bool satisfiesJointTolerance(const std::vector<double>& joint_values, const double tolerance);
+
+  /** Get current joint values */
+  std::vector<double> getCurrentJointValues(const std::string& group_name);
+
   /** Callback for target joint trajectories */
   void targetJointCallback(const trajectory_msgs::msg::JointTrajectoryPoint::ConstSharedPtr& msg);
 
@@ -146,6 +153,7 @@ private:
   rclcpp::Publisher<control_msgs::msg::JointJog>::SharedPtr joint_command_pub_;
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectoryPoint>::SharedPtr target_joint_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr velocity_scale_sub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr waypoint_reached_pub_;
 
   // Joint Waypoints
   bool target_joint_available_;
