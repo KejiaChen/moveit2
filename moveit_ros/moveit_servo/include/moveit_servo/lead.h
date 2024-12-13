@@ -72,7 +72,7 @@ enum class LeadStatusCode : int8_t
   INVALID = -1,
   SUCCESS = 0,
   EMPTY_TRAJECTORY = 1,
-  NO_RECENT_END_EFFECTOR_POSE = 2,
+  NO_RECENT_TARGET_JOINT = 2,
   STOP_REQUESTED = 3
 };
 
@@ -80,7 +80,7 @@ const std::unordered_map<LeadStatusCode, std::string> LEAD_STATUS_CODE_MAP = {
   { LeadStatusCode::INVALID, "Invalid" },
   { LeadStatusCode::SUCCESS, "Success" },
   { LeadStatusCode::EMPTY_TRAJECTORY, "Empty joint trajectories" },
-  { LeadStatusCode::NO_RECENT_END_EFFECTOR_POSE, "No recent end effector pose" },
+  { LeadStatusCode::NO_RECENT_TARGET_JOINT, "No recent target joint position" },
   { LeadStatusCode::STOP_REQUESTED, "Stop requested" }
 };
 
@@ -95,14 +95,20 @@ public:
   Lead(const rclcpp::Node::SharedPtr& node, const ServoParameters::SharedConstPtr& servo_parameters,
        const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor);
 
-  /** Process a trajectory in the queue */
-  LeadStatusCode processTrajectory();
+  /** Set the joint names */
+  void setJointNames(const std::vector<std::string>& joint_names);
 
-  /** Execute a trajectory online with velocity scaling */
-  LeadStatusCode executeTrajectory(const trajectory_msgs::msg::JointTrajectory& trajectory);
+  /** Execute a segment of the trajectory */
+  LeadStatusCode moveToJoint(const double target_joint_timeout);
+
+  // /**Return true if a target joint has been received within timeout */
+  // bool Lead::haveRecentTargetJoint(const double timespan);
+
+  // /**Return true if a joint position has been received within timeout */
+  // bool Lead::haveRecentJointPosition(const double timespan);
 
   /** Publish JointJog commands for servoing */
-  void publishJointJog(const std::vector<std::string>& joint_names, const std::vector<double>& velocities);
+  void publishJointJog(const std::vector<double>& velocities);
 
   /** Stop motion and reset flags */
   void stopMotion();
@@ -115,15 +121,10 @@ private:
   void readROSParams();
 
   /** Callback for target joint trajectories */
-  void targetJointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg);
+  void targetJointCallback(const trajectory_msgs::msg::JointTrajectoryPoint::ConstSharedPtr& msg);
 
   /** Perform cleanup after motion */
   void doPostMotionReset();
-
-  /** Execute a segment of the trajectory */
-  void executeTrajectorySegment(const trajectory_msgs::msg::JointTrajectoryPoint& current_point,
-                                const trajectory_msgs::msg::JointTrajectoryPoint& next_point,
-                                const std::vector<std::string>& joint_names);
 
   /** Callback for velocity scaling factor */
   void velocityScaleCallback(const std_msgs::msg::Float64::SharedPtr msg);
@@ -135,6 +136,7 @@ private:
   ServoParameters::SharedConstPtr servo_parameters_;
   planning_scene_monitor::PlanningSceneMonitorPtr planning_scene_monitor_;
   moveit::core::RobotModelConstPtr robot_model_;
+  std::vector<std::string> joint_names_;
 
   // Joint control
   std::string move_group_name_;
@@ -142,12 +144,16 @@ private:
 
   // ROS publishers and subscribers
   rclcpp::Publisher<control_msgs::msg::JointJog>::SharedPtr joint_command_pub_;
-  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr target_traj_sub_;
+  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectoryPoint>::SharedPtr target_joint_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr velocity_scale_sub_;
 
-  // Trajectory queue
-  std::queue<trajectory_msgs::msg::JointTrajectory> trajectory_queue_;
-  std::mutex queue_mutex_;
+  // Joint Waypoints
+  bool target_joint_available_;
+  trajectory_msgs::msg::JointTrajectoryPoint target_joint_;
+  mutable std::mutex target_joint_mtx_;
+
+  // Time
+  rclcpp::Time robot_joint_stamp_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
 
   // Velocity scale management
   double velocity_scale_ = 1.0;

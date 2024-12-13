@@ -81,6 +81,7 @@ Lead::Lead(const rclcpp::Node::SharedPtr& node, const ServoParameters::SharedCon
   , loop_rate_(1.0 / servo_parameters->publish_period)
   , velocity_scale_(1.0)
   , stop_requested_(false)
+  , target_joint_available_(false)
 {
   readROSParams();
 
@@ -90,15 +91,9 @@ Lead::Lead(const rclcpp::Node::SharedPtr& node, const ServoParameters::SharedCon
   servo_ = std::make_unique<moveit_servo::Servo>(node_, servo_parameters_, planning_scene_monitor_);
   servo_->start();
 
-  // Connect to MTC ROS interfaces
-  rclcpp::QoS qos_profile = rclcpp::QoS(rclcpp::KeepAll())
-                                .reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE) // Ensure reliability
-                                .durability(RMW_QOS_POLICY_DURABILITY_VOLATILE)   // Volatile durability
-                                .history(RMW_QOS_POLICY_HISTORY_KEEP_ALL);         // Keep all messages
-  target_traj_sub_ = node_->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-      // "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
-      "/mtc_joint_trajectory", qos_profile,
-      [this](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryCallback(msg); });
+  target_joint_sub_ = node_->create_subscription<trajectory_msgs::msg::JointTrajectoryPoint>(
+      "target_joint", rclcpp::SystemDefaultsQoS(),
+      [this](const trajectory_msgs::msg::JointTrajectoryPoint::ConstSharedPtr& msg) { return targetJointCallback(msg); });
 
   // Publish outgoing joint commands to the Servo object
   joint_command_pub_ = node_->create_publisher<control_msgs::msg::JointJog>(
@@ -109,115 +104,110 @@ Lead::Lead(const rclcpp::Node::SharedPtr& node, const ServoParameters::SharedCon
   //       "/velocity_scale", 10, std::bind(&Lead::velocityScaleCallback, this, std::placeholders::_1));
 }
 
-// Process a queue of trajectories
-LeadStatusCode Lead::processTrajectory(){
-  while (rclcpp::ok() && !stop_requested_)
+void Lead::setJointNames(const std::vector<std::string>& joint_names)
+{
+  joint_names_ = joint_names;
+  RCLCPP_INFO_STREAM(LOGGER, "Setting joint names: ");
+  for (const auto& name : joint_names_)
   {
-    trajectory_msgs::msg::JointTrajectory trajectory;
-
-    {
-      // Lock the queue and fetch the next trajectory if available
-      std::lock_guard<std::mutex> lock(queue_mutex_);
-      if (!trajectory_queue_.empty())
-      {
-        trajectory = trajectory_queue_.front();
-        trajectory_queue_.pop();
-      }
-    }
-    // If no trajectory is available, wait and retry
-    if (trajectory.points.empty())
-    {
-      // RCLCPP_INFO(LOGGER, "No trajectories in queue. Waiting for input...");
-      rclcpp::sleep_for(std::chrono::milliseconds(100));
-      continue;
-    }
-
-    // Track the entire trajectory
-    executeTrajectory(trajectory);
-
-    // Perform post-motion reset
-    doPostMotionReset();
+    RCLCPP_INFO_STREAM(LOGGER, name << " ");
   }
 }
-
-// Execution of a single trajectory
-LeadStatusCode Lead::executeTrajectory(const trajectory_msgs::msg::JointTrajectory& trajectory)
-{
-  if (trajectory.points.empty())
-  {
-    RCLCPP_WARN(LOGGER, "Received empty trajectory. Nothing to execute.");
-    return LeadStatusCode::EMPTY_TRAJECTORY;
-  }
-
-  double velocity_scale = 1.0; // Initial velocity scaling factor
-
-  for (size_t i = 0; i < trajectory.points.size() - 1 && !stop_requested_; ++i)
-{
-    const auto& current_point = trajectory.points[i];
-    const auto& next_point = trajectory.points[i + 1];
-    executeTrajectorySegment(current_point, next_point, trajectory.joint_names);
-    // RCLCPP_INFO(LOGGER, "Executing trajectory segment %zu of %zu.", i + 1, trajectory.points.size() - 1);
-}
-
-if (stop_requested_)
-{
-    RCLCPP_INFO(LOGGER, "Stop requested during trajectory tracking. Halting.");
-    doPostMotionReset();
-    return LeadStatusCode::STOP_REQUESTED;
-}
-
-RCLCPP_INFO(LOGGER, "Trajectory execution complete.");
-return LeadStatusCode::SUCCESS;
-}
-
 
 // Execution from current point to next point
-void Lead::executeTrajectorySegment(const trajectory_msgs::msg::JointTrajectoryPoint& current_point,
-                              const trajectory_msgs::msg::JointTrajectoryPoint& next_point,
-                              const std::vector<std::string>& joint_names)
+LeadStatusCode Lead::moveToJoint(const double target_joint_timeout)
 {
-  rclcpp::Time segment_start_time = node_->now();
+  // Reset stop requested flag before starting motions
+  stop_requested_ = false;
+  bool target_joint_available = false;
 
-  while (rclcpp::ok() && !stop_requested_)
-{
-    // Compute the time difference for this segment
-    double time_diff = (rclcpp::Duration(next_point.time_from_start) - rclcpp::Duration(current_point.time_from_start)).seconds();
-    if (time_diff <= 0)
+  rclcpp::Time start_time = node_->now();
+
+  // while ((!haveRecentTargetPose(target_joint_timeout) || !haveRecentEndEffectorPose(target_joint_timeout)) &&
+  //        ((node_->now() - start_time).seconds() < target_joint_timeout))
+  // {
+  //   robot_joint_stamp_ = node_->now();
+  //   std::this_thread::sleep_for(1ms);
+  // }
+
+  // Wait for a target joint to be available
+  while (rclcpp::ok() && !target_joint_available)
+  {
     {
-        RCLCPP_WARN(LOGGER, "Invalid time difference. Skipping segment.");
-        break;
+      std::lock_guard<std::mutex> lock(target_joint_mtx_);
+      target_joint_available = target_joint_available_;
     }
 
+    // if (!target_joint_available && (node_->now() - start_time).seconds() >= target_joint_timeout)
+    // {
+    //   RCLCPP_ERROR_STREAM(LOGGER, "No recent target joint data. Aborting.");
+    //   return LeadStatusCode::NO_RECENT_TARGET_JOINT;
+    // }
+
+    std::this_thread::sleep_for(1ms);  // Small sleep to avoid busy waiting
+  }
+
+  // Reset start time for execution
+  start_time = node_->now();
+
+  while (rclcpp::ok())
+  {
     // Fetch the latest velocity scale
-    double velocity_scale = getVelocityScale();
-    double scaled_time_diff = time_diff / velocity_scale;
+    // double velocity_scale = getVelocityScale();
+    double velocity_scale = 1.0;
 
     // Compute joint velocities
     std::vector<double> velocities;
-    for (size_t j = 0; j < current_point.positions.size(); ++j)
+    for (size_t j = 0; j < target_joint_.velocities.size(); ++j)
     {
-        double velocity = (next_point.positions[j] - current_point.positions[j]) / scaled_time_diff;
+        double velocity = target_joint_.velocities[j] * velocity_scale;
         velocities.push_back(velocity);
+    }
+    // velocities.push_back(0.0);
+    // velocities.push_back(0.0);
+    // velocities.push_back(0.0);
+    // velocities.push_back(0.0);
+    // velocities.push_back(0.1);
+    // velocities.push_back(0.1);
+
+    // std::vector<double> displacements;
+    // for (size_t j = 0; j < current_point.positions.size(); ++j)
+    // {
+    //     double displacement = target_joint_.positions[j] - current_point.positions[j];
+    //     displacements.push_back(displacement);
+    // }
+
+    if (stop_requested_)
+    {
+      RCLCPP_INFO_STREAM(LOGGER, "Halting servo motion, a stop was requested.");
+      doPostMotionReset();
+      return LeadStatusCode::STOP_REQUESTED;
     }
 
     // Publish JointJog message
-    publishJointJog(joint_names, velocities);
+    publishJointJog(velocities);
 
-    // Sleep based on Servo's publish period
     if (!loop_rate_.sleep())
     {
-        RCLCPP_WARN_STREAM_THROTTLE(LOGGER, *node_->get_clock(), LOG_THROTTLE_PERIOD, "Control loop missed.");
+      RCLCPP_WARN_STREAM_THROTTLE(LOGGER, *node_->get_clock(), LOG_THROTTLE_PERIOD, "Target control rate was missed");
     }
 
-    // Check if the segment duration is complete
-    if ((node_->now() - segment_start_time).seconds() >= scaled_time_diff)
-    {   
-        RCLCPP_INFO(LOGGER, "Segment duration complete. Breaking the loop...");
-        break;
-    }
+  }
+
+  doPostMotionReset();
+  return LeadStatusCode::SUCCESS;
 }
 
-}
+// bool Lead::haveRecentTargetJoint(const double timespan)
+// {
+//   std::lock_guard<std::mutex> lock(target_joint_mtx_);
+//   return ((node_->now() - target_joint_.header.stamp).seconds() < timespan);
+// }
+
+// bool Lead::haveRecentJointPosition(const double timespan)
+// {
+//   return ((node_->now() - command_frame_transform_stamp_).seconds() < timespan);
+// }
 
 void Lead::velocityScaleCallback(const std_msgs::msg::Float64::SharedPtr msg)
 {
@@ -232,15 +222,22 @@ double Lead::getVelocityScale()
   return velocity_scale_;
 }
 
-void Lead::publishJointJog(const std::vector<std::string>& joint_names, const std::vector<double>& velocities)
+void Lead::publishJointJog(const std::vector<double>& velocities)
 {
   control_msgs::msg::JointJog jog_msg;
-  jog_msg.header.stamp = node_->now();
-  jog_msg.joint_names = joint_names;
+  jog_msg.header.stamp = node_->now(); // This is important!
+  jog_msg.joint_names = joint_names_;
+  // jog_msg.displacements = displacements;
   jog_msg.velocities = velocities;
   jog_msg.duration = 0.0; // Zero duration implies immediate execution by MoveIt Servo
 
-  joint_command_pub_->publish(jog_msg);
+  RCLCPP_INFO_STREAM(LOGGER, "Publishing joint velocities: " << jog_msg.velocities[0] << ", " << jog_msg.velocities[1] << ", " << jog_msg.velocities[2]
+                      << ", " << jog_msg.velocities[3] << ", " << jog_msg.velocities[4] << ", " << jog_msg.velocities[5]);
+
+  // RCLCPP_INFO_STREAM(LOGGER, "Publishing joint displacements: " << jog_msg.displacements[0] << ", " << jog_msg.displacements[1] << ", " << jog_msg.displacements[2]
+  //                     << ", " << jog_msg.displacements[3] << ", " << jog_msg.displacements[4] << ", " << jog_msg.displacements[5]);
+
+  joint_command_pub_->publish(std::move(jog_msg));
 }
 
 void Lead::readROSParams()
@@ -262,16 +259,12 @@ void Lead::readROSParams()
   declareOrGetParam(windup_limit, ns + ".windup_limit", node_, LOGGER);
 }
 
-void Lead::targetJointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg)
+void Lead::targetJointCallback(const trajectory_msgs::msg::JointTrajectoryPoint::ConstSharedPtr& msg)
 {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (trajectory_queue_.size() >= MAX_QUEUE_SIZE)
-    {
-        RCLCPP_WARN(LOGGER, "Trajectory queue is full. Dropping oldest trajectory.");
-        trajectory_queue_.pop();  // Remove oldest trajectory
-    }
-    trajectory_queue_.push(*msg);
-    RCLCPP_INFO(LOGGER, "Received new trajectory with %zu waypoints.", msg->points.size());
+    std::lock_guard<std::mutex> lock(target_joint_mtx_);
+    target_joint_ = *msg;
+    target_joint_available_ = true;
+    RCLCPP_INFO_STREAM(LOGGER, "Received target joint position");
 }
 
 
@@ -282,8 +275,8 @@ void Lead::stopMotion()
   // Send a 0 command to Servo to halt arm motion
   auto msg = moveit::util::make_shared_from_pool<control_msgs::msg::JointJog>();
   {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    msg->joint_names = trajectory_queue_.back().joint_names;
+    std::lock_guard<std::mutex> lock(target_joint_mtx_);
+    msg->joint_names = joint_names_;
   }
   msg->header.stamp = node_->now();
   joint_command_pub_->publish(*msg);

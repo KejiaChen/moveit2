@@ -162,7 +162,7 @@ int main(int argc, char** argv)
   tf2_ros::TransformListener tf_listener(tf_buffer);
 
   // Create the pose tracker
-  // moveit_servo::Lead tracker(node, servo_parameters, planning_scene_monitor);
+  moveit_servo::Lead tracker(node, servo_parameters, planning_scene_monitor);
 
   // Subscribe to servo status (and log it when it changes)
   StatusMonitor status_monitor(node, servo_parameters->status_topic);
@@ -172,15 +172,16 @@ int main(int argc, char** argv)
   // tracker.resetTargetPose();
 
   // Run the pose tracking in a new thread
-  // std::thread execute_joint_trajectory_thread([&tracker] {
-  //   moveit_servo::LeadStatusCode lead_status = tracker.moveToJoint();
-  //   RCLCPP_INFO_STREAM(LOGGER, "Joint trajectory execution exited with status: "
-  //                                  << moveit_servo::LEAD_STATUS_CODE_MAP.at(lead_status));
-  // });
+  std::thread execute_joint_trajectory_thread([&tracker] {
+    moveit_servo::LeadStatusCode lead_status = tracker.moveToJoint(0.1);
+    RCLCPP_INFO_STREAM(LOGGER, "Joint trajectory execution exited with status: "
+                                   << moveit_servo::LEAD_STATUS_CODE_MAP.at(lead_status));
+  });
 
   trajectory_msgs::msg::JointTrajectory trajectory;
-  rclcpp::WallRate loop_rate(100);
+  rclcpp::WallRate loop_rate(10);
   bool processing_trajectory = false;
+  bool set_joint_names = false;
 
   while (rclcpp::ok()) {
     if (!processing_trajectory && !trajectory_queue.empty()) {
@@ -190,6 +191,7 @@ int main(int argc, char** argv)
             trajectory = trajectory_queue.front();
             trajectory_queue.pop();
             processing_trajectory = true; // Mark that we are processing a trajectory
+            set_joint_names = true;       // Mark that we need to set joint names
             RCLCPP_INFO(LOGGER, "Processing new trajectory with %zu waypoints.", trajectory.points.size());
         }
     }
@@ -199,7 +201,10 @@ int main(int argc, char** argv)
         static size_t point_index = 0; // Keep track of the current point index
 
         // set Joint names
-        // tracker.setJointNames(trajectory.joint_names);
+        if (set_joint_names) {
+            tracker.setJointNames(trajectory.joint_names);
+            set_joint_names = false;
+        }
 
         if (point_index < trajectory.points.size() - 1) {
             const auto& current_point = trajectory.points[point_index];
@@ -232,7 +237,7 @@ int main(int argc, char** argv)
 }
 
   // Make sure the tracker is stopped and clean up
-  // execute_joint_trajectory_thread.join();
+  execute_joint_trajectory_thread.join();
 
   // Kill executor thread before shutdown
   executor.cancel();
