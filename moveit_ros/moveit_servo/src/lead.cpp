@@ -125,6 +125,7 @@ LeadStatusCode Lead::moveToJoint(const double target_joint_timeout)
   // Reset stop requested flag before starting motions
   stop_requested_ = false;
   bool target_joint_available = false;
+  const double control_period = servo_parameters_->publish_period; // Control loop period
 
   rclcpp::Time start_time = node_->now();
 
@@ -155,6 +156,8 @@ LeadStatusCode Lead::moveToJoint(const double target_joint_timeout)
   // Reset start time for execution
   start_time = node_->now();
 
+  bool waypoint_reached = false;
+  std::vector<double> previous_velocities(target_joint_.positions.size(), 0.0);
   while (rclcpp::ok())
   {
     // Get the current joint values
@@ -163,7 +166,11 @@ LeadStatusCode Lead::moveToJoint(const double target_joint_timeout)
     // check if this waypoint is reached
     if (satisfiesJointTolerance(current_joint, 0.01))
     {
-      RCLCPP_INFO_STREAM(LOGGER, "The target joint is achieved!");
+      if (!waypoint_reached)
+      {
+        RCLCPP_INFO_STREAM(LOGGER, "The target joint is achieved!");
+        waypoint_reached = true;
+      }
       std_msgs::msg::Bool msg;
       msg.data = true;
       waypoint_reached_pub_->publish(msg); // TODO@Kejia: change to service
@@ -172,28 +179,22 @@ LeadStatusCode Lead::moveToJoint(const double target_joint_timeout)
 
     // Fetch the latest velocity scale
     // double velocity_scale = getVelocityScale();
-    double velocity_scale = 0.8;
-
+    double velocity_scale = 1.0;
+    
     // Compute joint velocities TODO@Kejia: use current joint values
     std::vector<double> velocities;
     for (size_t j = 0; j < target_joint_.velocities.size(); ++j)
     {
-        double velocity = target_joint_.velocities[j] * velocity_scale;
-        velocities.push_back(velocity);
-    }
-    // velocities.push_back(0.0);
-    // velocities.push_back(0.0);
-    // velocities.push_back(0.0);
-    // velocities.push_back(0.0);
-    // velocities.push_back(0.1);
-    // velocities.push_back(0.1);
+        // double velocity = target_joint_.velocities[j] * velocity_scale;
 
-    // std::vector<double> displacements;
-    // for (size_t j = 0; j < current_point.positions.size(); ++j)
-    // {
-    //     double displacement = target_joint_.positions[j] - current_point.positions[j];
-    //     displacements.push_back(displacement);
-    // }
+        // double velocity = (target_joint_.positions[j] - current_joint[j]) * velocity_scale;
+        // velocities.push_back(velocity);
+
+        double position_error = target_joint_.positions[j] - current_joint[j];
+        double target_velocity = (position_error / control_period) * velocity_scale;
+        velocities.push_back(target_velocity);
+
+    }
 
     if (stop_requested_)
     {
@@ -319,7 +320,7 @@ bool Lead::satisfiesJointTolerance(const std::vector<double>& joint_values, cons
 
   if (joint_values.size() != target_joint_.positions.size())
   {
-    RCLCPP_ERROR_STREAM(LOGGER, "Joint values size does not match target joint size");
+    RCLCPP_WARN_STREAM(LOGGER, "Joint values size does not match target joint size");
     return false;
   }
 
