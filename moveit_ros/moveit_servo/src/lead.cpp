@@ -166,14 +166,15 @@ LeadStatusCode Lead::moveToJoint(const double target_joint_timeout)
       RCLCPP_INFO_STREAM(LOGGER, "The target joint is achieved!");
       std_msgs::msg::Bool msg;
       msg.data = true;
-      waypoint_reached_pub_->publish(msg);
+      waypoint_reached_pub_->publish(msg); // TODO@Kejia: change to service
+      continue;
     }
 
     // Fetch the latest velocity scale
     // double velocity_scale = getVelocityScale();
-    double velocity_scale = 1.0;
+    double velocity_scale = 0.8;
 
-    // Compute joint velocities
+    // Compute joint velocities TODO@Kejia: use current joint values
     std::vector<double> velocities;
     for (size_t j = 0; j < target_joint_.velocities.size(); ++j)
     {
