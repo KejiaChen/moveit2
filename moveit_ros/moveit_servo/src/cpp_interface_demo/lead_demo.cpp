@@ -204,6 +204,8 @@ int main(int argc, char** argv)
   rclcpp::WallRate loop_rate(10);
   bool processing_trajectory = false;
   bool set_joint_names = false;
+  std::vector<std::string> lead_joint_names;
+  std::vector<size_t> lead_joint_indices; // To map filtered joints back to their original indices
 
   while (rclcpp::ok()) {
     if (!processing_trajectory && !trajectory_queue.empty()) {
@@ -224,50 +226,71 @@ int main(int argc, char** argv)
 
         // set Joint names
         if (set_joint_names) {
-            if (trajectory.joint_names.size() > ROBOT_JOINT_DIM) { // multiple joint groups
-                RCLCPP_WARN(LOGGER, "joint size: %zu", trajectory.joint_names.size());
-                std::vector<std::string> first_seven_joint_names(trajectory.joint_names.begin() + ROBOT_JOINT_DIM, trajectory.joint_names.end());
-                tracker.setJointNames(first_seven_joint_names);
+            lead_joint_names.clear();
+            lead_joint_indices.clear();
+            for (size_t i = 0; i < trajectory.joint_names.size(); ++i) {
+                const auto& joint_name = trajectory.joint_names[i];
+                if (joint_name.find("right_") != std::string::npos) { // Filter right-side joints
+                    lead_joint_names.push_back(joint_name);
+                    lead_joint_indices.push_back(i);
+                }
             }
-            else{
-              tracker.setJointNames(trajectory.joint_names);
+
+            if (lead_joint_names.empty()) {
+                RCLCPP_WARN(LOGGER, "No lead joints found in trajectory. Skipping...");
+                processing_trajectory = false;
+                continue;
             }
             
+            tracker.setJointNames(lead_joint_names);
             set_joint_names = false;
         }
 
         if (point_index < trajectory.points.size() - 1) {
             const auto& current_point = trajectory.points[point_index];
             const auto& next_point = trajectory.points[point_index + 1];
+            RCLCPP_INFO(LOGGER, "next waypoint has position size %zu", next_point.positions.size());
 
             trajectory_msgs::msg::JointTrajectoryPoint target_point;
-            // When there are more than one joint group, we need to split the joints
-            if (trajectory.joint_names.size() > ROBOT_JOINT_DIM) {
-                target_point.positions = std::vector<double>(next_point.positions.begin() + ROBOT_JOINT_DIM, next_point.positions.end());
-                if (!next_point.velocities.empty()) {
-                    target_point.velocities = std::vector<double>(next_point.velocities.begin() + ROBOT_JOINT_DIM, next_point.velocities.end());
-                }
-                if (!next_point.accelerations.empty()) {
-                    target_point.accelerations = std::vector<double>(next_point.accelerations.begin() + ROBOT_JOINT_DIM, next_point.accelerations.end());
-                }
-                if (!next_point.effort.empty()) {
-                    target_point.effort = std::vector<double>(next_point.effort.begin() + ROBOT_JOINT_DIM, next_point.effort.end());
-                }
-                target_point.time_from_start = next_point.time_from_start;
-            } else {
-                target_point = next_point;
+            // Extract only right-side joints for the target point
+            target_point.positions.resize(lead_joint_indices.size());
+            for (size_t i = 0; i < lead_joint_indices.size(); ++i) {
+                target_point.positions[i] = next_point.positions[lead_joint_indices[i]];
             }
+
+            if (!next_point.velocities.empty()) {
+                target_point.velocities.resize(lead_joint_indices.size());
+                for (size_t i = 0; i < lead_joint_indices.size(); ++i) {
+                    target_point.velocities[i] = next_point.velocities[lead_joint_indices[i]];
+                }
+            }
+
+            if (!next_point.accelerations.empty()) {
+                target_point.accelerations.resize(lead_joint_indices.size());
+                for (size_t i = 0; i < lead_joint_indices.size(); ++i) {
+                    target_point.accelerations[i] = next_point.accelerations[lead_joint_indices[i]];
+                }
+            }
+
+            if (!next_point.effort.empty()) {
+                target_point.effort.resize(lead_joint_indices.size());
+                for (size_t i = 0; i < lead_joint_indices.size(); ++i) {
+                    target_point.effort[i] = next_point.effort[lead_joint_indices[i]];
+                }
+            }
+
+            target_point.time_from_start = next_point.time_from_start;
 
             // Reset the waypoint_reached flag
             waypoint_reached = false;
 
             // tracker.executeTrajectorySegment(current_point, next_point, trajectory.joint_names);
             target_joint_pub->publish(target_point);
-            RCLCPP_INFO(LOGGER, "Process point %zu", point_index);
-            if (next_point.positions.size() == 7) {
+            RCLCPP_INFO(LOGGER, "Process target point %zu with size %zu", point_index, target_point.positions.size());
+            if (target_point.positions.size() == ROBOT_JOINT_DIM) {
                 RCLCPP_INFO(LOGGER, "Published next joint position: %f, %f, %f, %f, %f, %f, %f",
-                        next_point.positions[0], next_point.positions[1], next_point.positions[2], 
-                        next_point.positions[3], next_point.positions[4], next_point.positions[5], next_point.positions[6]);
+                        target_point.positions[0], target_point.positions[1], target_point.positions[2], 
+                        target_point.positions[3], target_point.positions[4], target_point.positions[5], target_point.positions[6]);
             }
           
             // Wait for waypoint confirmation
