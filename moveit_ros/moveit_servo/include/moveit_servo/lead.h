@@ -111,6 +111,11 @@ public:
   /** Publish JointJog commands for servoing */
   void publishJointJog(const std::vector<double>& velocities);
 
+  /** \brief Change PID parameters. Motion is stopped before the update */
+  void updatePIDConfig(const double proportional_gain, const double integral_gain, const double derivative_gain);
+
+  // void getPIDErrors(double& x_error, double& y_error, double& z_error, double& orientation_error);
+
   /** Stop motion and reset flags */
   void stopMotion();
 
@@ -121,6 +126,9 @@ private:
   /** Initialize ROS parameters */
   void readROSParams();
 
+  /** \brief Initialize a PID controller and add it to vector of controllers */
+  void initializePID(const PIDConfig& pid_config, std::vector<control_toolbox::Pid>& pid_vector);
+
   /** Check if the joint values are within tolerance of the target joint */
   bool satisfiesJointTolerance(const std::vector<double>& joint_values, const double tolerance);
 
@@ -130,7 +138,10 @@ private:
   /** Callback for target joint trajectories */
   void targetJointCallback(const trajectory_msgs::msg::JointTrajectoryPoint::ConstSharedPtr& msg);
 
-  /** Perform cleanup after motion */
+  /** \brief Use PID controllers to calculate a full spatial velocity toward a joint position */
+  std::vector<double> calculateJointCommand(const std::vector<double>& current_joint_values);
+
+  /** Perform cleanup and reset PID after motion */
   void doPostMotionReset();
 
   /** Callback for velocity scaling factor */
@@ -154,6 +165,12 @@ private:
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectoryPoint>::SharedPtr target_joint_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr velocity_scale_sub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr waypoint_reached_pub_;
+
+  // PID controllers
+  std::vector<control_toolbox::Pid> joint_pids_;
+  // Joint PID configs
+  PIDConfig joint_pid_config_;
+  double joint_reach_tolerance_;
 
   // Joint Waypoints
   bool target_joint_available_;

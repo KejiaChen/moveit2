@@ -117,6 +117,9 @@ void Lead::setJointNames(const std::vector<std::string>& joint_names)
   {
     RCLCPP_INFO_STREAM(LOGGER, name << " ");
   }
+
+    // initialize PID
+  initializePID(joint_pid_config_, joint_pids_);
 }
 
 // Execution from current point to next point
@@ -164,7 +167,7 @@ LeadStatusCode Lead::moveToJoint(const double target_joint_timeout)
     auto current_joint = getCurrentJointValues(move_group_name_);
 
     // check if this waypoint is reached
-    if (satisfiesJointTolerance(current_joint, 0.01))
+    if (satisfiesJointTolerance(current_joint, joint_reach_tolerance_))
     {
       if (!waypoint_reached)
       {
@@ -182,19 +185,21 @@ LeadStatusCode Lead::moveToJoint(const double target_joint_timeout)
     double velocity_scale = 1.0;
     
     // Compute joint velocities TODO@Kejia: use current joint values
-    std::vector<double> velocities;
-    for (size_t j = 0; j < target_joint_.velocities.size(); ++j)
-    {
-        // double velocity = target_joint_.velocities[j] * velocity_scale;
+    // std::vector<double> velocities;
+    // for (size_t j = 0; j < target_joint_.velocities.size(); ++j)
+    // {
+    //     // double velocity = target_joint_.velocities[j] * velocity_scale;
 
-        // double velocity = (target_joint_.positions[j] - current_joint[j]) * velocity_scale;
-        // velocities.push_back(velocity);
+    //     double velocity = (target_joint_.positions[j] - current_joint[j]) * velocity_scale;
+    //     velocities.push_back(velocity);
 
-        double position_error = target_joint_.positions[j] - current_joint[j];
-        double target_velocity = (position_error / control_period) * velocity_scale;
-        velocities.push_back(target_velocity);
+    //     // double position_error = target_joint_.positions[j] - current_joint[j];
+    //     // double target_velocity = (position_error / control_period) * velocity_scale;
+    //     // velocities.push_back(target_velocity);
 
-    }
+    // }
+
+    std::vector<double> velocities = calculateJointCommand(current_joint);
 
     if (stop_requested_)
     {
@@ -273,9 +278,38 @@ void Lead::readROSParams()
 
   double publish_period;
   declareOrGetParam(publish_period, ns + ".publish_period", node_, LOGGER);
+  joint_pid_config_.dt = publish_period;
 
   double windup_limit;
   declareOrGetParam(windup_limit, ns + ".windup_limit", node_, LOGGER);
+  joint_pid_config_.windup_limit = windup_limit;
+
+  declareOrGetParam(joint_pid_config_.k_p, ns + ".joint_proportional_gain", node_, LOGGER);
+  declareOrGetParam(joint_pid_config_.k_i, ns + ".joint_integral_gain", node_, LOGGER);
+  declareOrGetParam(joint_pid_config_.k_d, ns + ".joint_derivative_gain", node_, LOGGER);
+  declareOrGetParam(joint_reach_tolerance_, ns + ".joint_reach_tolerance", node_, LOGGER);
+}
+
+void Lead::initializePID(const PIDConfig& pid_config, std::vector<control_toolbox::Pid>& pid_vector)
+{
+  bool use_anti_windup = true;
+   // Resize the vector to match the number of joints
+    pid_vector.clear();
+    pid_vector.resize(joint_names_.size());
+
+    // Initialize each PID controller
+    for (size_t i = 0; i < joint_names_.size(); ++i) {
+        pid_vector[i] = control_toolbox::Pid(
+            pid_config.k_p,
+            pid_config.k_i,
+            pid_config.k_d,
+            pid_config.windup_limit,
+            -pid_config.windup_limit,
+            use_anti_windup
+        );
+        RCLCPP_INFO(LOGGER, "Initialized PID for joint %zu with Kp: %.3f, Ki: %.3f, Kd: %.3f", 
+                    i, pid_config.k_p, pid_config.k_i, pid_config.k_d);
+    }
 }
 
 std::vector<double> Lead::getCurrentJointValues(const std::string& group_name)
@@ -320,7 +354,7 @@ bool Lead::satisfiesJointTolerance(const std::vector<double>& joint_values, cons
 
   if (joint_values.size() != target_joint_.positions.size())
   {
-    RCLCPP_WARN_STREAM(LOGGER, "Joint values size does not match target joint size");
+    RCLCPP_ERROR_STREAM(LOGGER, "Joint values size does not match target joint size");
     return false;
   }
 
@@ -344,6 +378,39 @@ void Lead::targetJointCallback(const trajectory_msgs::msg::JointTrajectoryPoint:
 }
 
 
+std::vector<double> Lead::calculateJointCommand(const std::vector<double>& current_joint_values)
+{
+  std::vector<double> joint_velocity;
+  std::lock_guard<std::mutex> lock(target_joint_mtx_);
+  if (!target_joint_available_)
+  {
+    RCLCPP_ERROR_STREAM(LOGGER, "No target joint available to calculate joint command");
+    return joint_velocity;
+  }
+
+  // Validate sizes
+  if (joint_names_.size() != current_joint_values.size() || 
+      joint_names_.size() != target_joint_.positions.size() || 
+      joint_names_.size() != joint_pids_.size()) 
+  {
+      RCLCPP_ERROR(LOGGER, "Size mismatch detected. Joint names: %zu, Current joint values: %zu, Target joint positions: %zu, PID controllers: %zu",
+                    joint_names_.size(), current_joint_values.size(), target_joint_.positions.size(), joint_pids_.size());
+      return joint_velocity;
+  }
+
+  // Calculate joint command using PID controllers
+  for (size_t i = 0; i < joint_names_.size(); ++i)
+  {
+    double error = target_joint_.positions[i] - current_joint_values[i];
+    double command = joint_pids_[i].computeCommand(error, loop_rate_.period().count());
+    RCLCPP_INFO_STREAM(LOGGER, "Joint " << joint_names_[i] << " error: " << error << " command: " << command);
+    joint_velocity.push_back(command);
+    // joint_velocity.push_back(joint_pids_[i].getCurrentCmd());
+  }
+
+  return joint_velocity;
+}
+
 void Lead::stopMotion()
 {
   stop_requested_ = true;
@@ -364,5 +431,25 @@ void Lead::doPostMotionReset()
   stop_requested_ = false;
   angular_error_ = {};
 
+  // Reset error integrals and previous errors of PID controllers
+  for (auto& pid : joint_pids_)
+  {
+    pid.reset();
+  }
 }
+
+void Lead::updatePIDConfig(const double proportional_gain, const double integral_gain, const double derivative_gain)
+{
+  stopMotion();
+
+  joint_pid_config_.k_p = proportional_gain;
+  joint_pid_config_.k_i = integral_gain;
+  joint_pid_config_.k_d = derivative_gain;
+
+  joint_pids_.clear();
+  initializePID(joint_pid_config_, joint_pids_);
+
+  doPostMotionReset();
+}
+
 }  // namespace moveit_servo
