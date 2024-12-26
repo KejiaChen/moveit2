@@ -262,6 +262,13 @@ void ServoParameters::declare(const std::string& ns,
                                      ParameterDescriptorBuilder{}
                                          .type(PARAMETER_DOUBLE)
                                          .description("Start decelerating when a scene collision is this far [m]"));
+
+  // Servo or Republish
+  node_parameters->declare_parameter(
+      ns + ".only_republish", ParameterValue{ parameters.only_republish },
+      ParameterDescriptorBuilder{}
+          .type(PARAMETER_BOOL)
+          .description("Whether only republishing or servoing the trajectory"));
 }
 
 ServoParameters ServoParameters::get(const std::string& ns,
@@ -347,6 +354,9 @@ ServoParameters ServoParameters::get(const std::string& ns,
       node_parameters->get_parameter(ns + ".self_collision_proximity_threshold").as_double();
   parameters.scene_collision_proximity_threshold =
       node_parameters->get_parameter(ns + ".scene_collision_proximity_threshold").as_double();
+
+  // Servo or Republish
+  parameters.only_republish = node_parameters->get_parameter(ns + ".only_republish").as_bool();
 
   return parameters;
 }

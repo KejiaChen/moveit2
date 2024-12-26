@@ -103,6 +103,113 @@ void targetJointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::
     RCLCPP_INFO(LOGGER, "Received new trajectory with %zu waypoints.", msg->points.size());
 }
 
+rclcpp::Duration scale_duration(const builtin_interfaces::msg::Duration &duration, double factor)
+{
+    rclcpp::Duration original_duration(duration);
+    return rclcpp::Duration::from_nanoseconds(original_duration.nanoseconds() * factor);
+}
+
+void targetJointTrajectoryRepublishCallback(const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg,
+                                            rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr& pub,
+                                            double factor)
+{   
+    RCLCPP_INFO(LOGGER, "Received new trajectory with %zu waypoints.", msg->points.size());
+
+    /* Split only lead arm joints from the trajectory msg*/
+    // get desired joint names
+    std::vector<std::string> lead_joint_names;
+    std::vector<size_t> lead_joint_indices; // To map filtered joints back to their original indices
+
+    for (size_t i = 0; i < msg->joint_names.size(); ++i) {
+        const auto& joint_name = msg->joint_names[i];
+        if (joint_name.find("right_") != std::string::npos) { // Filter right-side joints
+            // Filter out finger joints
+            if (joint_name.find("finger") != std::string::npos) {
+                RCLCPP_INFO(LOGGER, "Skipping finger trajectory");
+                return;
+            }
+            lead_joint_names.push_back(joint_name);
+            lead_joint_indices.push_back(i);
+        }
+    }
+
+    if (lead_joint_names.empty()) {
+        RCLCPP_WARN(LOGGER, "No lead arm joints found in trajectory. Skipping...");
+        return;
+    }else{
+        RCLCPP_INFO(LOGGER, "Joint names: ");
+        for (const auto& name : lead_joint_names)
+        {
+            RCLCPP_INFO_STREAM(LOGGER, name << " ");
+        }
+    }
+
+    // Construct msg with only lead arm joints
+    trajectory_msgs::msg::JointTrajectory new_msg;
+    new_msg.header = msg->header;
+    new_msg.joint_names = lead_joint_names;
+
+    for (const auto& point : msg->points) {
+        trajectory_msgs::msg::JointTrajectoryPoint lead_point;
+
+        // Filter positions
+        for (const auto& index : lead_joint_indices) {
+            lead_point.positions.push_back(point.positions[index]);
+            if (!point.velocities.empty()) {
+                lead_point.velocities.push_back(point.velocities[index] * factor);
+            }
+            if (!point.accelerations.empty()) {
+                lead_point.accelerations.push_back(point.accelerations[index]);
+            }
+            if (!point.effort.empty()) {
+                lead_point.effort.push_back(point.effort[index]);
+            }
+        }
+
+        lead_point.time_from_start = point.time_from_start;
+        new_msg.points.push_back(lead_point);
+    }
+
+    // auto new_msg = std::make_shared<trajectory_msgs::msg::JointTrajectory>(*msg);
+   
+    /* Velocity Scaling*/
+    // // Divide the trajectory into two halves
+    // const auto total_points = msg->points.size();
+    // const auto half_idx = total_points / 2;
+
+    // rclcpp::Duration cumulative_time(0, 0);
+    
+    // for (size_t i = 0; i < total_points; ++i){
+    //     // Determine the scaling factor based on the segment
+    //     double factor = (i < half_idx) ? 2.0 : 0.5;  // First half: 0.5x speed, Second half: 2x speed
+
+    //     // Calculate the duration from the previous point
+    //     rclcpp::Duration original_time_from_prev(msg->points[i].time_from_start.sec, msg->points[i].time_from_start.nanosec);
+    //     RCLCPP_INFO_STREAM(LOGGER, "Original time from prev: " << original_time_from_prev.seconds() << "s" << original_time_from_prev.nanoseconds() << "ns");
+    //     if (i > 0)
+    //     {
+    //         rclcpp::Duration prev_time_from_start(msg->points[i - 1].time_from_start.sec, msg->points[i - 1].time_from_start.nanosec);
+    //         original_time_from_prev = original_time_from_prev - prev_time_from_start;
+    //     }
+
+    //     // Scale the duration and add it to the cumulative time
+    //     rclcpp::Duration adjusted_time_from_prev = original_time_from_prev * factor;
+    //     cumulative_time = cumulative_time + adjusted_time_from_prev;
+
+    //     // Assign the scaled cumulative time to `time_from_start`
+    //     new_msg->points[i].time_from_start.sec = cumulative_time.seconds();
+    //     new_msg->points[i].time_from_start.nanosec = cumulative_time.nanoseconds() % 1000000000;
+
+    //     // new_msg->points[i].time_from_start = scale_duration(msg->points[i].time_from_start, factor);
+    // }
+
+    // pub->publish(*new_msg);
+    // RCLCPP_INFO(LOGGER, "Republished new trajectory with %zu waypoints.", new_msg->points.size());
+
+    pub->publish(new_msg);
+    RCLCPP_INFO(LOGGER, "Republished new trajectory with %zu waypoints.", new_msg.points.size());
+}
+
 // Callback function to update waypoint status
 void waypointReachedCallback(const std_msgs::msg::Bool::ConstSharedPtr& msg)
 {
@@ -131,10 +238,18 @@ int main(int argc, char** argv)
                                 .reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE) // Ensure reliability
                                 .durability(RMW_QOS_POLICY_DURABILITY_VOLATILE)   // Volatile durability
                                 .history(RMW_QOS_POLICY_HISTORY_KEEP_ALL);         
-  auto mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-      // "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
-      "mtc_joint_trajectory", qos_profile,
-      [&queue_mutex, &trajectory_queue](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryCallback(msg, queue_mutex, trajectory_queue); });
+//   auto mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+//       // "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
+//       "mtc_joint_trajectory", qos_profile,
+//       [&queue_mutex, &trajectory_queue](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryCallback(msg, queue_mutex, trajectory_queue); });
+
+ auto trajectory_outgoing_cmd_pub = node->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+        "/right_arm_controller/joint_trajectory", rclcpp::SystemDefaultsQoS());
+
+ auto mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+      "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
+    //   "mtc_joint_trajectory", qos_profile,
+      [&trajectory_outgoing_cmd_pub](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryRepublishCallback(msg, trajectory_outgoing_cmd_pub, 1.0); });
 
   // Subscription for waypoint confirmation
   auto waypoint_status_sub = node->create_subscription<std_msgs::msg::Bool>(
@@ -217,6 +332,17 @@ int main(int argc, char** argv)
             processing_trajectory = true; // Mark that we are processing a trajectory
             set_joint_names = true;       // Mark that we need to set joint names
             RCLCPP_INFO(LOGGER, "Processing new trajectory with %zu waypoints.", trajectory.points.size());
+
+            // if (trajectory.points.size() > 2) {
+            //   // interpolated_trajectory = interpolateTrajectory(trajectory, 0.1, 0, 0.4, {}, false);
+            //   interpolated_trajectory = interpolateTrajectoryWithSmoothVelocity(trajectory, 0.1, 0.4, 0.5, false);
+            //   RCLCPP_INFO(LOGGER, "Interpolated trajectory has %zu waypoints.", interpolated_trajectory.points.size());
+            // }else{
+            //   // reinitialize the interpolated trajectory
+            //   InterpolatedTrajectory replicate_trajectory;
+            //   replicate_trajectory.points = trajectory.points;
+            //   interpolated_trajectory = replicate_trajectory;
+            // }
         }
     }
 
@@ -231,13 +357,17 @@ int main(int argc, char** argv)
             for (size_t i = 0; i < trajectory.joint_names.size(); ++i) {
                 const auto& joint_name = trajectory.joint_names[i];
                 if (joint_name.find("right_") != std::string::npos) { // Filter right-side joints
+                    // Filter out finger joints
+                    if (joint_name.find("finger") != std::string::npos) {
+                        continue;
+                    }
                     lead_joint_names.push_back(joint_name);
                     lead_joint_indices.push_back(i);
                 }
             }
 
             if (lead_joint_names.empty()) {
-                RCLCPP_WARN(LOGGER, "No lead joints found in trajectory. Skipping...");
+                RCLCPP_WARN(LOGGER, "No lead arm joints found in trajectory. Skipping...");
                 processing_trajectory = false;
                 continue;
             }
@@ -249,6 +379,8 @@ int main(int argc, char** argv)
         if (point_index < trajectory.points.size() - 1) {
             const auto& current_point = trajectory.points[point_index];
             const auto& next_point = trajectory.points[point_index + 1];
+            // const auto& current_point = interpolated_trajectory.points[point_index];
+            // const auto& next_point = interpolated_trajectory.points[point_index + 1];
             RCLCPP_INFO(LOGGER, "next waypoint has position size %zu", next_point.positions.size());
 
             trajectory_msgs::msg::JointTrajectoryPoint target_point;
@@ -292,6 +424,12 @@ int main(int argc, char** argv)
                         target_point.positions[0], target_point.positions[1], target_point.positions[2], 
                         target_point.positions[3], target_point.positions[4], target_point.positions[5], target_point.positions[6]);
             }
+            if (target_point.velocities.size() == ROBOT_JOINT_DIM) {
+                RCLCPP_INFO(LOGGER, "Published next joint velocity: %f, %f, %f, %f, %f, %f, %f",
+                        target_point.velocities[0], target_point.velocities[1], target_point.velocities[2], 
+                        target_point.velocities[3], target_point.velocities[4], target_point.velocities[5], target_point.velocities[6]);
+            }
+          
           
             // Wait for waypoint confirmation
             std::unique_lock<std::mutex> lock(cv_mutex);
