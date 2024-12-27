@@ -230,26 +230,44 @@ int main(int argc, char** argv)
   rclcpp::init(argc, argv);
   rclcpp::Node::SharedPtr node = rclcpp::Node::make_shared("lead_demo");
 
+  auto servo_parameters = moveit_servo::ServoParameters::makeServoParameters(node);
+
+  if (servo_parameters == nullptr)
+  {
+    RCLCPP_FATAL(LOGGER, "Could not get servo parameters!");
+    exit(EXIT_FAILURE);
+  }
+  
   // Trajectory queue
   std::queue<trajectory_msgs::msg::JointTrajectory> trajectory_queue;
   std::mutex queue_mutex;
-
+  
   rclcpp::QoS qos_profile = rclcpp::QoS(rclcpp::KeepAll())
                                 .reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE) // Ensure reliability
                                 .durability(RMW_QOS_POLICY_DURABILITY_VOLATILE)   // Volatile durability
                                 .history(RMW_QOS_POLICY_HISTORY_KEEP_ALL);         
-//   auto mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-//       // "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
-//       "mtc_joint_trajectory", qos_profile,
-//       [&queue_mutex, &trajectory_queue](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryCallback(msg, queue_mutex, trajectory_queue); });
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_outgoing_cmd_pub;
+  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr mtc_traj_sub;
 
- auto trajectory_outgoing_cmd_pub = node->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+  if (servo_parameters->only_republish){
+    RCLCPP_INFO(LOGGER, "Only republishing the trajectory");
+    trajectory_outgoing_cmd_pub = node->create_publisher<trajectory_msgs::msg::JointTrajectory>(
         "/right_arm_controller/joint_trajectory", rclcpp::SystemDefaultsQoS());
 
- auto mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-      "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
-    //   "mtc_joint_trajectory", qos_profile,
-      [&trajectory_outgoing_cmd_pub](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryRepublishCallback(msg, trajectory_outgoing_cmd_pub, 1.0); });
+    mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+        "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
+        //   "mtc_joint_trajectory", qos_profile,
+        [&trajectory_outgoing_cmd_pub](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryRepublishCallback(msg, trajectory_outgoing_cmd_pub, 1.0); });
+
+  }else{
+    RCLCPP_INFO(LOGGER, "Servoing the trajectory");
+    
+    mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+        // "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
+        "mtc_joint_trajectory", qos_profile,
+        [&queue_mutex, &trajectory_queue](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryCallback(msg, queue_mutex, trajectory_queue); });
+
+  }
 
   // Subscription for waypoint confirmation
   auto waypoint_status_sub = node->create_subscription<std_msgs::msg::Bool>(
@@ -260,14 +278,6 @@ int main(int argc, char** argv)
   rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(node);
   std::thread executor_thread([&executor]() { executor.spin(); });
-
-  auto servo_parameters = moveit_servo::ServoParameters::makeServoParameters(node);
-
-  if (servo_parameters == nullptr)
-  {
-    RCLCPP_FATAL(LOGGER, "Could not get servo parameters!");
-    exit(EXIT_FAILURE);
-  }
 
   // Load the planning scene monitor
   planning_scene_monitor::PlanningSceneMonitorPtr planning_scene_monitor;
