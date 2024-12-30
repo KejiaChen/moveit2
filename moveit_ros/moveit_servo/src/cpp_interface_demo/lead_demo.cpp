@@ -50,6 +50,8 @@
 #include <std_msgs/msg/bool.hpp>
 #include <atomic>
 #include <condition_variable>
+#include <rclcpp_action/rclcpp_action.hpp>
+#include <control_msgs/action/follow_joint_trajectory.hpp>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_servo.lead_demo");
 std::atomic<bool> start_tracking(false);  // Shared variable to indicate tracking state
@@ -57,8 +59,11 @@ constexpr size_t MAX_QUEUE_SIZE = 10;
 
 // Shared flag to indicate waypoint completion
 std::atomic<bool> waypoint_reached(false);
+std::atomic<bool> trajectory_done(false);
 std::mutex cv_mutex;
 std::condition_variable cv;
+std::condition_variable trajectory_done_cv;  // To wait for trajectory execution
+std::mutex trajectory_done_mutex;    
 
 int ROBOT_JOINT_DIM = 7;
 
@@ -222,6 +227,43 @@ void waypointReachedCallback(const std_msgs::msg::Bool::ConstSharedPtr& msg)
     }
 }
 
+void sendTrajectoryToController(const trajectory_msgs::msg::JointTrajectory& trajectory, 
+                                rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::SharedPtr& trajectory_client) {
+    auto goal_msg = control_msgs::action::FollowJointTrajectory::Goal();
+    goal_msg.trajectory = trajectory;
+
+    if (!trajectory_client->wait_for_action_server(std::chrono::seconds(5))) {
+        RCLCPP_ERROR(LOGGER, "Action server not available");
+        {
+            std::lock_guard<std::mutex> lock(trajectory_done_mutex);
+            trajectory_done = false;  // Reset processing state
+        }
+        trajectory_done_cv.notify_one();  // Notify waiting thread
+        return;
+    }
+
+    auto send_goal_options = rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::SendGoalOptions();
+    send_goal_options.result_callback = [](const rclcpp_action::ClientGoalHandle<control_msgs::action::FollowJointTrajectory>::WrappedResult& result) {
+        if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
+            RCLCPP_INFO(LOGGER, "Trajectory execution finished successfully");
+        } else {
+            RCLCPP_ERROR(LOGGER, "Trajectory execution failed or was canceled");
+        }
+
+        // Signal the condition_variable to unblock the main loop
+        {
+            std::lock_guard<std::mutex> lock(trajectory_done_mutex);
+            trajectory_done = true;
+        }
+        trajectory_done_cv.notify_one();
+    };
+
+    trajectory_client->async_send_goal(goal_msg, send_goal_options);
+
+    RCLCPP_INFO(LOGGER, "Trajectory sent to controller with %zu waypoints.", trajectory.points.size());
+}
+
+
 /**
  * Instantiate the pose tracking interface.
  * Send a pose slightly different from the starting pose
@@ -255,11 +297,16 @@ int main(int argc, char** argv)
         [&queue_mutex, &trajectory_queue](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryCallback(msg, queue_mutex, trajectory_queue); });
   
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_outgoing_cmd_pub;
-
+  rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::SharedPtr trajectory_client;
+  
   if (servo_parameters->only_republish){
     RCLCPP_INFO(LOGGER, "Only republishing the trajectory");
+
     trajectory_outgoing_cmd_pub = node->create_publisher<trajectory_msgs::msg::JointTrajectory>(
         "/right_arm_controller/joint_trajectory", rclcpp::SystemDefaultsQoS());
+
+    trajectory_client = rclcpp_action::create_client<control_msgs::action::FollowJointTrajectory>(
+			node, "/right_arm_controller/follow_joint_trajectory");
 
     // mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
     //     "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
@@ -343,17 +390,6 @@ int main(int argc, char** argv)
             processing_trajectory = true; // Mark that we are processing a trajectory
             set_joint_names = true;       // Mark that we need to set joint names
             RCLCPP_INFO(LOGGER, "Processing new trajectory with %zu waypoints.", trajectory.points.size());
-
-            // if (trajectory.points.size() > 2) {
-            //   // interpolated_trajectory = interpolateTrajectory(trajectory, 0.1, 0, 0.4, {}, false);
-            //   interpolated_trajectory = interpolateTrajectoryWithSmoothVelocity(trajectory, 0.1, 0.4, 0.5, false);
-            //   RCLCPP_INFO(LOGGER, "Interpolated trajectory has %zu waypoints.", interpolated_trajectory.points.size());
-            // }else{
-            //   // reinitialize the interpolated trajectory
-            //   InterpolatedTrajectory replicate_trajectory;
-            //   replicate_trajectory.points = trajectory.points;
-            //   interpolated_trajectory = replicate_trajectory;
-            // }
         }
     }
 
@@ -418,8 +454,16 @@ int main(int argc, char** argv)
             }
 
             /*Republish*/
-            trajectory_outgoing_cmd_pub->publish(new_msg);
-            RCLCPP_INFO(LOGGER, "Republished new trajectory with %zu waypoints.", new_msg.points.size());
+            // trajectory_outgoing_cmd_pub->publish(new_msg);
+            // RCLCPP_INFO(LOGGER, "Republished new trajectory with %zu waypoints.", new_msg.points.size());
+
+            // Wait for trajectory execution
+            sendTrajectoryToController(new_msg, trajectory_client);
+
+            // Wait for trajectory execution to complete
+            std::unique_lock<std::mutex> lock(trajectory_done_mutex);
+            trajectory_done_cv.wait(lock, []{ return trajectory_done.load(); });
+
             processing_trajectory = false;
             
         }else{
@@ -523,7 +567,7 @@ int main(int argc, char** argv)
     } else {
         // Log a message if no trajectory is being processed
         auto clock = node->get_clock();
-        RCLCPP_INFO_THROTTLE(LOGGER, *clock, 2000, "Waiting for trajectories...");
+        RCLCPP_INFO_THROTTLE(LOGGER, *clock, 5000, "Waiting for trajectories...");
     }
         
     // // Add a small sleep to prevent busy-waiting
