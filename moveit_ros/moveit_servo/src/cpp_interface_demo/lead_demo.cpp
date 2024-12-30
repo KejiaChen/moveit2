@@ -90,8 +90,10 @@ private:
   rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr sub_;
 };
 
-void targetJointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg, std::mutex& queue_mutex,
-                                         std::queue<trajectory_msgs::msg::JointTrajectory>& trajectory_queue)
+void targetJointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg, 
+                                  std::mutex& queue_mutex,
+                                  std::queue<trajectory_msgs::msg::JointTrajectory>& trajectory_queue
+                                  )
 {
     std::lock_guard<std::mutex> lock(queue_mutex);
     if (trajectory_queue.size() >= MAX_QUEUE_SIZE)
@@ -110,8 +112,8 @@ rclcpp::Duration scale_duration(const builtin_interfaces::msg::Duration &duratio
 }
 
 void targetJointTrajectoryRepublishCallback(const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg,
-                                            rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr& pub,
-                                            double factor)
+                                            rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr& pub
+                                            )
 {   
     RCLCPP_INFO(LOGGER, "Received new trajectory with %zu waypoints.", msg->points.size());
 
@@ -156,7 +158,7 @@ void targetJointTrajectoryRepublishCallback(const trajectory_msgs::msg::JointTra
         for (const auto& index : lead_joint_indices) {
             lead_point.positions.push_back(point.positions[index]);
             if (!point.velocities.empty()) {
-                lead_point.velocities.push_back(point.velocities[index] * factor);
+                lead_point.velocities.push_back(point.velocities[index]);
             }
             if (!point.accelerations.empty()) {
                 lead_point.accelerations.push_back(point.accelerations[index]);
@@ -245,28 +247,27 @@ int main(int argc, char** argv)
   rclcpp::QoS qos_profile = rclcpp::QoS(rclcpp::KeepAll())
                                 .reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE) // Ensure reliability
                                 .durability(RMW_QOS_POLICY_DURABILITY_VOLATILE)   // Volatile durability
-                                .history(RMW_QOS_POLICY_HISTORY_KEEP_ALL);         
-  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_outgoing_cmd_pub;
+                                .history(RMW_QOS_POLICY_HISTORY_KEEP_ALL);
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr mtc_traj_sub;
+  mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+        // "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
+        "mtc_joint_trajectory", qos_profile,
+        [&queue_mutex, &trajectory_queue](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryCallback(msg, queue_mutex, trajectory_queue); });
+  
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_outgoing_cmd_pub;
 
   if (servo_parameters->only_republish){
     RCLCPP_INFO(LOGGER, "Only republishing the trajectory");
     trajectory_outgoing_cmd_pub = node->create_publisher<trajectory_msgs::msg::JointTrajectory>(
         "/right_arm_controller/joint_trajectory", rclcpp::SystemDefaultsQoS());
 
-    mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-        "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
-        //   "mtc_joint_trajectory", qos_profile,
-        [&trajectory_outgoing_cmd_pub](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryRepublishCallback(msg, trajectory_outgoing_cmd_pub, 1.0); });
+    // mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+    //     "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
+    //     //   "mtc_joint_trajectory", qos_profile,
+    //     [&trajectory_outgoing_cmd_pub](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryRepublishCallback(msg, trajectory_outgoing_cmd_pub); });
 
   }else{
     RCLCPP_INFO(LOGGER, "Servoing the trajectory");
-    
-    mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-        // "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
-        "mtc_joint_trajectory", qos_profile,
-        [&queue_mutex, &trajectory_queue](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryCallback(msg, queue_mutex, trajectory_queue); });
-
   }
 
   // Subscription for waypoint confirmation
@@ -357,6 +358,72 @@ int main(int argc, char** argv)
     }
 
     if (processing_trajectory) {
+
+        if (servo_parameters->only_republish){
+            /* Split only lead arm joints from the trajectory msg*/
+            // get desired joint names
+            std::vector<std::string> lead_joint_names;
+            std::vector<size_t> lead_joint_indices; // To map filtered joints back to their original indices
+
+            for (size_t i = 0; i < trajectory.joint_names.size(); ++i) {
+                const auto& joint_name = trajectory.joint_names[i];
+                if (joint_name.find("right_") != std::string::npos) { // Filter right-side joints
+                    // Filter out finger joints
+                    if (joint_name.find("finger") != std::string::npos) {
+                        RCLCPP_INFO(LOGGER, "Skipping finger trajectory");
+                        processing_trajectory = false;
+                        continue;
+                    }
+                    lead_joint_names.push_back(joint_name);
+                    lead_joint_indices.push_back(i);
+                }
+            }
+
+            if (lead_joint_names.empty()) {
+                RCLCPP_WARN(LOGGER, "No lead arm joints found in trajectory. Skipping...");
+                processing_trajectory = false;
+                continue;
+            }else{
+                RCLCPP_INFO(LOGGER, "Joint names: ");
+                for (const auto& name : lead_joint_names)
+                {
+                    RCLCPP_INFO_STREAM(LOGGER, name << " ");
+                }
+            }
+
+            // Construct msg with only lead arm joints
+            trajectory_msgs::msg::JointTrajectory new_msg;
+            new_msg.header = trajectory.header;
+            new_msg.joint_names = lead_joint_names;
+
+            for (const auto& point : trajectory.points) {
+                trajectory_msgs::msg::JointTrajectoryPoint lead_point;
+
+                // Filter positions
+                for (const auto& index : lead_joint_indices) {
+                    lead_point.positions.push_back(point.positions[index]);
+                    if (!point.velocities.empty()) {
+                        lead_point.velocities.push_back(point.velocities[index]);
+                    }
+                    if (!point.accelerations.empty()) {
+                        lead_point.accelerations.push_back(point.accelerations[index]);
+                    }
+                    if (!point.effort.empty()) {
+                        lead_point.effort.push_back(point.effort[index]);
+                    }
+                }
+
+                lead_point.time_from_start = point.time_from_start;
+                new_msg.points.push_back(lead_point);
+            }
+
+            /*Republish*/
+            trajectory_outgoing_cmd_pub->publish(new_msg);
+            RCLCPP_INFO(LOGGER, "Republished new trajectory with %zu waypoints.", new_msg.points.size());
+            processing_trajectory = false;
+            
+        }else{
+
         // Execute trajectory points one by one
         static size_t point_index = 0; // Keep track of the current point index
 
@@ -451,6 +518,7 @@ int main(int argc, char** argv)
             RCLCPP_INFO(LOGGER, "Finished executing trajectory.");
             processing_trajectory = false; // Reset state
             point_index = 0;              // Reset the point index
+        }
         }
     } else {
         // Log a message if no trajectory is being processed
