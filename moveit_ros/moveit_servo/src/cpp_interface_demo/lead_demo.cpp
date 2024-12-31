@@ -465,8 +465,9 @@ int main(int argc, char** argv)
             trajectory_done_cv.wait(lock, []{ return trajectory_done.load(); });
 
             processing_trajectory = false;
-            
-        }else{
+            trajectory_done = false;
+
+        }else{ // servoing the trajectory
 
         // Execute trajectory points one by one
         static size_t point_index = 0; // Keep track of the current point index

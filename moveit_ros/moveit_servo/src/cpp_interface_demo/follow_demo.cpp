@@ -462,6 +462,7 @@ int main(int argc, char** argv)
         trajectory_done_cv.wait(lock, []{ return trajectory_done.load(); });
 
         processing_trajectory = false;
+        trajectory_done = false;
       }else{
         auto clock = node->get_clock();
         RCLCPP_INFO_THROTTLE(LOGGER, *clock, 5000, "Waiting for trajectories...");
