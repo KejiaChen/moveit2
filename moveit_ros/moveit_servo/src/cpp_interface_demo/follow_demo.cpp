@@ -51,9 +51,16 @@
 #include <queue>
 #include <std_msgs/msg/bool.hpp>
 #include <atomic>
+#include <rclcpp_action/rclcpp_action.hpp>
+#include <control_msgs/action/follow_joint_trajectory.hpp>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_servo.follow_demo");
 std::atomic<bool> start_tracking(false);  // Shared variable to indicate tracking state
+constexpr size_t MAX_QUEUE_SIZE = 10; 
+// Shared flag to indicate waypoint completion
+std::atomic<bool> trajectory_done(false);
+std::condition_variable trajectory_done_cv;  // To wait for trajectory execution
+std::mutex trajectory_done_mutex;   
 
 // Callback for start tracking signal
 void startSignalCallback(const std_msgs::msg::Bool::ConstSharedPtr msg)
@@ -164,6 +171,57 @@ void targetJointTrajectoryRepublishCallback(const trajectory_msgs::msg::JointTra
     RCLCPP_INFO(LOGGER, "Republished new trajectory with %zu waypoints.", new_msg.points.size());
 }
 
+void targetJointTrajectoryCallback(const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg, 
+                                  std::mutex& queue_mutex,
+                                  std::queue<trajectory_msgs::msg::JointTrajectory>& trajectory_queue
+                                  )
+{
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    if (trajectory_queue.size() >= MAX_QUEUE_SIZE)
+    {
+        RCLCPP_WARN(LOGGER, "Trajectory queue is full. Dropping oldest trajectory.");
+        trajectory_queue.pop();  // Remove oldest trajectory
+    }
+    trajectory_queue.push(*msg);
+    RCLCPP_INFO(LOGGER, "Received new trajectory with %zu waypoints.", msg->points.size());
+}
+
+void sendTrajectoryToController(const trajectory_msgs::msg::JointTrajectory& trajectory, 
+                                rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::SharedPtr& trajectory_client) {
+    auto goal_msg = control_msgs::action::FollowJointTrajectory::Goal();
+    goal_msg.trajectory = trajectory;
+
+    if (!trajectory_client->wait_for_action_server(std::chrono::seconds(5))) {
+        RCLCPP_ERROR(LOGGER, "Action server not available");
+        {
+            std::lock_guard<std::mutex> lock(trajectory_done_mutex);
+            trajectory_done = false;  // Reset processing state
+        }
+        trajectory_done_cv.notify_one();  // Notify waiting thread
+        return;
+    }
+
+    auto send_goal_options = rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::SendGoalOptions();
+    send_goal_options.result_callback = [](const rclcpp_action::ClientGoalHandle<control_msgs::action::FollowJointTrajectory>::WrappedResult& result) {
+        if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
+            RCLCPP_INFO(LOGGER, "Trajectory execution finished successfully");
+        } else {
+            RCLCPP_ERROR(LOGGER, "Trajectory execution failed or was canceled");
+        }
+
+        // Signal the condition_variable to unblock the main loop
+        {
+            std::lock_guard<std::mutex> lock(trajectory_done_mutex);
+            trajectory_done = true;
+        }
+        trajectory_done_cv.notify_one();
+    };
+
+    trajectory_client->async_send_goal(goal_msg, send_goal_options);
+
+    RCLCPP_INFO(LOGGER, "Trajectory sent to controller with %zu waypoints.", trajectory.points.size());
+}
+
 /**
  * Instantiate the pose tracking interface.
  * Send a pose slightly different from the starting pose
@@ -194,17 +252,32 @@ int main(int argc, char** argv)
    
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_outgoing_cmd_pub;
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr mtc_traj_sub;
+  rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::SharedPtr trajectory_client;
 
   if (servo_parameters->only_republish){
     RCLCPP_INFO(LOGGER, "Only republishing the trajectory");
+
     trajectory_outgoing_cmd_pub = node->create_publisher<trajectory_msgs::msg::JointTrajectory>(
         "/left_arm_controller/joint_trajectory", rclcpp::SystemDefaultsQoS());
+    trajectory_client = rclcpp_action::create_client<control_msgs::action::FollowJointTrajectory>(
+			node, "/left_arm_controller/follow_joint_trajectory");
 
+    rclcpp::QoS qos_profile = rclcpp::QoS(rclcpp::KeepAll())
+                                .reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE) // Ensure reliability
+                                .durability(RMW_QOS_POLICY_DURABILITY_VOLATILE)   // Volatile durability
+                                .history(RMW_QOS_POLICY_HISTORY_KEEP_ALL);
     mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-        "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
-        //   "mtc_joint_trajectory", qos_profile,
-        [&trajectory_outgoing_cmd_pub](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryRepublishCallback(msg, trajectory_outgoing_cmd_pub, 1.0); });
+          // "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
+          "mtc_joint_trajectory", qos_profile,
+          [&queue_mutex, &trajectory_queue](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryCallback(msg, queue_mutex, trajectory_queue); });
 
+    // mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+    //     "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
+    //     //   "mtc_joint_trajectory", qos_profile,
+    //     [&trajectory_outgoing_cmd_pub](const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr& msg) { return targetJointTrajectoryRepublishCallback(msg, trajectory_outgoing_cmd_pub, 1.0); });
+
+  } else {
+    RCLCPP_INFO(LOGGER, "Servoing the trajectory");
   }
 
   // Load the planning scene monitor
@@ -297,9 +370,104 @@ int main(int argc, char** argv)
   // }
 
   geometry_msgs::msg::TransformStamped transform_stamped;
+  trajectory_msgs::msg::JointTrajectory trajectory;
+  bool processing_trajectory = false;
+  std::vector<std::string> follow_joint_names;
+  std::vector<size_t> follow_joint_indices; // To map filtered joints back to their original indices
+
+
   while ((rclcpp::ok)) {
-    if (start_tracking.load())
-    { if (!servo_parameters->only_republish){
+    if (servo_parameters->only_republish){
+      if (!processing_trajectory && !trajectory_queue.empty()) {
+        // Fetch the next trajectory from the queue
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        if (!trajectory_queue.empty()) {
+            trajectory = trajectory_queue.front();
+            trajectory_queue.pop();
+            processing_trajectory = true; // Mark that we are processing a trajectory
+            RCLCPP_INFO(LOGGER, "Processing new trajectory with %zu waypoints.", trajectory.points.size());
+        }
+      }
+      if (processing_trajectory) {
+        /* Split only follow arm joints from the trajectory msg*/
+        // get desired joint names
+        std::vector<std::string> follow_joint_names;
+        std::vector<size_t> follow_joint_indices; // To map filtered joints back to their original indices
+
+        for (size_t i = 0; i < trajectory.joint_names.size(); ++i) {
+            const auto& joint_name = trajectory.joint_names[i];
+            if (joint_name.find("left_") != std::string::npos) { // Filter left-side joints
+                // Filter out finger joints
+                if (joint_name.find("finger") != std::string::npos) {
+                    RCLCPP_INFO(LOGGER, "Skipping finger trajectory");
+                    processing_trajectory = false;
+                    continue;
+                }
+                follow_joint_names.push_back(joint_name);
+                follow_joint_indices.push_back(i);
+            }
+        }
+
+        if (follow_joint_names.empty()) {
+            // RCLCPP_WARN(LOGGER, "No follow arm joints found in trajectory. Skipping...");
+            processing_trajectory = false;
+            continue;
+        }else{
+            RCLCPP_INFO(LOGGER, "Joint names: ");
+            for (const auto& name : follow_joint_names)
+            {
+                RCLCPP_INFO_STREAM(LOGGER, name << " ");
+            }
+            if (!start_tracking.load()){
+              start_tracking.store(true);
+              RCLCPP_INFO(LOGGER, "Received valid trajectory. Start tracking.");
+            }
+        }
+
+        // Construct msg with only follow arm joints
+        trajectory_msgs::msg::JointTrajectory new_msg;
+        new_msg.header = trajectory.header;
+        new_msg.joint_names = follow_joint_names;
+
+        for (const auto& point : trajectory.points) {
+            trajectory_msgs::msg::JointTrajectoryPoint follow_point;
+
+            // Filter positions
+            for (const auto& index : follow_joint_indices) {
+                follow_point.positions.push_back(point.positions[index]);
+                if (!point.velocities.empty()) {
+                    follow_point.velocities.push_back(point.velocities[index]);
+                }
+                if (!point.accelerations.empty()) {
+                    follow_point.accelerations.push_back(point.accelerations[index]);
+                }
+                if (!point.effort.empty()) {
+                    follow_point.effort.push_back(point.effort[index]);
+                }
+            }
+
+            follow_point.time_from_start = point.time_from_start;
+            new_msg.points.push_back(follow_point);
+        }
+
+        /*Republish*/
+        // trajectory_outgoing_cmd_pub->publish(new_msg);
+        // RCLCPP_INFO(LOGGER, "Republished new trajectory with %zu waypoints.", new_msg.points.size());
+
+        // Wait for trajectory execution
+        sendTrajectoryToController(new_msg, trajectory_client);
+
+        // Wait for trajectory execution to complete
+        std::unique_lock<std::mutex> lock(trajectory_done_mutex);
+        trajectory_done_cv.wait(lock, []{ return trajectory_done.load(); });
+
+        processing_trajectory = false;
+      }else{
+        auto clock = node->get_clock();
+        RCLCPP_INFO_THROTTLE(LOGGER, *clock, 5000, "Waiting for trajectories...");
+      }
+    } else{
+    if (start_tracking.load()){ // Servoing and start signal received
       try {
         // Get the transform from master's EE to follower's base
         // transform_stamped = tf_buffer.lookupTransform(servo_parameters->planning_frame, servo_parameters->leading_ee_frame, tf2::TimePointZero);
@@ -328,14 +496,14 @@ int main(int argc, char** argv)
       catch (tf2::TransformException &ex) {
         RCLCPP_ERROR_STREAM(LOGGER, "Could not get transform: " << ex.what());
       }
-      }
     }
     else
     {
       auto clock = node->get_clock();
-      RCLCPP_INFO_THROTTLE(LOGGER, *clock, 2000, "Waiting for start signal...");
+      RCLCPP_INFO_THROTTLE(LOGGER, *clock, 5000, "Waiting for start signal...");
     }
-    
+    }
+
     // Add a small sleep to prevent busy-waiting
     loop_rate.sleep();
   }
