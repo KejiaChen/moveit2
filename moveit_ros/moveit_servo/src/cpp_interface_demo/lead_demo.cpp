@@ -52,6 +52,7 @@
 #include <condition_variable>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
+#include <control_msgs/action/gripper_command.hpp>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("moveit_servo.lead_demo");
 std::atomic<bool> start_tracking(false);  // Shared variable to indicate tracking state
@@ -227,6 +228,50 @@ void waypointReachedCallback(const std_msgs::msg::Bool::ConstSharedPtr& msg)
     }
 }
 
+void sendGripperCmdToController(const trajectory_msgs::msg::JointTrajectory &trajectory,
+                                 rclcpp_action::Client<control_msgs::action::GripperCommand>::SharedPtr &hand_client) {
+        if (trajectory.points.empty()) {
+            RCLCPP_ERROR(LOGGER, "Trajectory points are empty!");
+            return;
+        }
+
+        // Iterate through the trajectory points
+        for (const auto &point : trajectory.points) {
+            if (point.positions.empty()) {
+                RCLCPP_WARN(LOGGER, "Trajectory point has no position.");
+                continue;
+            }
+
+            double gripper_position = point.positions[0];
+
+            // Create the GripperCommand goal
+            auto goal_msg = control_msgs::action::GripperCommand::Goal();
+            goal_msg.command.position = gripper_position;
+            goal_msg.command.max_effort = 10.0;  // Adjust as needed
+
+            // Send the goal to the action server
+            if (!hand_client->wait_for_action_server(std::chrono::seconds(5))) {
+                RCLCPP_ERROR(LOGGER, "Gripper action server not available!");
+                return;
+            }
+
+            auto send_goal_options = rclcpp_action::Client<control_msgs::action::GripperCommand>::SendGoalOptions();
+            send_goal_options.result_callback = [](const rclcpp_action::ClientGoalHandle<control_msgs::action::GripperCommand>::WrappedResult &result) {
+                if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
+                    RCLCPP_INFO(rclcpp::get_logger("GripperCommandSender"), "Gripper command succeeded.");
+                } else {
+                    RCLCPP_ERROR(rclcpp::get_logger("GripperCommandSender"), "Gripper command failed.");
+                }
+            };
+
+            // Send the goal
+            hand_client->async_send_goal(goal_msg, send_goal_options);
+
+            // Optional: Wait between commands to simulate the trajectory execution time
+            rclcpp::sleep_for(std::chrono::milliseconds(100));
+        }
+}
+
 void sendTrajectoryToController(const trajectory_msgs::msg::JointTrajectory& trajectory, 
                                 rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::SharedPtr& trajectory_client) {
     auto goal_msg = control_msgs::action::FollowJointTrajectory::Goal();
@@ -298,6 +343,7 @@ int main(int argc, char** argv)
   
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr trajectory_outgoing_cmd_pub;
   rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::SharedPtr trajectory_client;
+  rclcpp_action::Client<control_msgs::action::GripperCommand>::SharedPtr hand_client;
   
   if (servo_parameters->only_republish){
     RCLCPP_INFO(LOGGER, "Only republishing the trajectory");
@@ -307,6 +353,9 @@ int main(int argc, char** argv)
 
     trajectory_client = rclcpp_action::create_client<control_msgs::action::FollowJointTrajectory>(
 			node, "/right_arm_controller/follow_joint_trajectory");
+
+    hand_client = rclcpp_action::create_client<control_msgs::action::GripperCommand>(
+            node, "/right_hand_controller/gripper_cmd");
 
     // mtc_traj_sub = node->create_subscription<trajectory_msgs::msg::JointTrajectory>(
     //     "/mtc_joint_trajectory", rclcpp::SystemDefaultsQoS(),
@@ -406,7 +455,17 @@ int main(int argc, char** argv)
                 if (joint_name.find("right_") != std::string::npos) { // Filter right-side joints
                     // Filter out finger joints
                     if (joint_name.find("finger") != std::string::npos) {
-                        RCLCPP_INFO(LOGGER, "Skipping finger trajectory");
+                        // print the finger trajectory
+                        // RCLCPP_INFO(LOGGER, "receive the following finger trajectory");
+                        // for (const auto& point : trajectory.points) {
+                        //     for (const auto& position : point.positions) {
+                        //         RCLCPP_INFO_STREAM(LOGGER, position << " ");
+                        //     }
+                        // }
+
+                        RCLCPP_INFO(LOGGER, "Republish finger trajectory directly");
+                        sendGripperCmdToController(trajectory, hand_client);
+
                         processing_trajectory = false;
                         continue;
                     }
