@@ -160,10 +160,13 @@ CartesianInterpolator::Percentage CartesianInterpolator::computeCartesianPath(
     // Explicitly use a single IK attempt only: We want a smooth trajectory.
     // Random seeding (of additional attempts) would probably create IK jumps.
     if (start_state->setFromIK(group, pose * offset, link->getName(), consistency_limits, 0.0, validCallback, options,
-                               cost_function))
+                               cost_function)){
       traj.push_back(std::make_shared<moveit::core::RobotState>(*start_state));
-    else
+    }
+    else{
+      RCLCPP_INFO_STREAM(LOGGER, "Failed to setFromIK in computeCartesianPath for Pose at "<<pose.translation().transpose());
       break;
+    }
 
     last_valid_percentage = percentage;
   }
