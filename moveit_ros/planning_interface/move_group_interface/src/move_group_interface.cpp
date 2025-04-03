@@ -951,7 +951,7 @@ public:
                               double jump_threshold, moveit_msgs::msg::RobotTrajectory& msg,
                               const moveit_msgs::msg::Constraints& path_constraints, bool avoid_collisions,
                               moveit_msgs::msg::MoveItErrorCodes& error_code,
-                              const Eigen::Isometry3d ee_offset)
+                              const Eigen::Isometry3d ee_offset, bool time_parametrization)
   {
     auto req = std::make_shared<moveit_msgs::srv::GetCartesianPath::Request>();
     moveit_msgs::srv::GetCartesianPath::Response::SharedPtr response;
@@ -972,6 +972,7 @@ public:
     req->link_name = getEndEffectorLink();
     geometry_msgs::msg::Pose ee_offset_msg = tf2::toMsg(ee_offset);
     req->offset = ee_offset_msg;
+    req->time_parameterization = time_parametrization;
 
     auto future_response = cartesian_path_service_->async_send_request(req);
     if (future_response.valid())
@@ -1598,29 +1599,29 @@ moveit::core::MoveItErrorCode MoveGroupInterface::plan(Plan& plan)
 double MoveGroupInterface::computeCartesianPath(const std::vector<geometry_msgs::msg::Pose>& waypoints, double eef_step,
                                                 double jump_threshold, moveit_msgs::msg::RobotTrajectory& trajectory,
                                                 bool avoid_collisions, moveit_msgs::msg::MoveItErrorCodes* error_code,
-                                                const Eigen::Isometry3d ee_offset)
+                                                const Eigen::Isometry3d ee_offset, bool time_parametrization)
 {
   moveit_msgs::msg::Constraints path_constraints_tmp;
   return computeCartesianPath(waypoints, eef_step, jump_threshold, trajectory, path_constraints_tmp, avoid_collisions,
-                              error_code, ee_offset);
+                              error_code, ee_offset, time_parametrization);
 }
 
 double MoveGroupInterface::computeCartesianPath(const std::vector<geometry_msgs::msg::Pose>& waypoints, double eef_step,
                                                 double jump_threshold, moveit_msgs::msg::RobotTrajectory& trajectory,
                                                 const moveit_msgs::msg::Constraints& path_constraints,
                                                 bool avoid_collisions, moveit_msgs::msg::MoveItErrorCodes* error_code,
-                                                const Eigen::Isometry3d ee_offset)
+                                                const Eigen::Isometry3d ee_offset, bool time_parametrization)
 {
   if (error_code)
   {
     return impl_->computeCartesianPath(waypoints, eef_step, jump_threshold, trajectory, path_constraints,
-                                       avoid_collisions, *error_code, ee_offset);
+                                       avoid_collisions, *error_code, ee_offset, time_parametrization);
   }
   else
   {
     moveit_msgs::msg::MoveItErrorCodes error_code_tmp;
     return impl_->computeCartesianPath(waypoints, eef_step, jump_threshold, trajectory, path_constraints,
-                                       avoid_collisions, error_code_tmp, ee_offset);
+                                       avoid_collisions, error_code_tmp, ee_offset, time_parametrization);
   }
 }
 
