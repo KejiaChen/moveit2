@@ -98,10 +98,33 @@ public:
 
   const std::string& getGroupName() const;
 
+  const std::string& getTipLink() const;
+
   RobotTrajectory& setGroupName(const std::string& group_name)
   {
     group_ = robot_model_->getJointModelGroup(group_name);
     return *this;
+  }
+
+
+  bool setTipLink(const std::string& tip_link) {
+    tip_link_ = tip_link;
+
+    // calculate the distance from the previous waypoint for existing waypoints
+    distance_from_previous_.clear();
+    distance_from_previous_.push_back(0.0);
+    for (std::size_t i = 1; i < waypoints_.size(); ++i)
+    {
+      double distance = (waypoints_[i]->getGlobalLinkTransform(tip_link_).translation()- waypoints_[i-1]->getGlobalLinkTransform(tip_link_).translation()).norm();
+      distance_from_previous_.push_back(distance);
+    }
+
+    // assert distance_from_previous_ has the same size as duration_from_previous_
+    return distance_from_previous_.size() == duration_from_previous_.size();
+  }
+
+  bool isTipLinkSet() const {
+    return !tip_link_.empty();
   }
 
   std::size_t getWayPointCount() const
@@ -158,6 +181,13 @@ public:
 
   [[deprecated]] double getWaypointDurationFromStart(std::size_t index) const;
 
+  /** @brief  Returns the distance from start that a waypoint will be reached.
+   *  @param  The waypoint index.
+   *  @return The distance from start; returns overall distance if index is out of range.
+   */
+  double getWayPointDistaceFromStart(std::size_t index) const;
+
+
   double getWayPointDurationFromPrevious(std::size_t index) const
   {
     if (duration_from_previous_.size() > index)
@@ -196,9 +226,25 @@ public:
    */
   RobotTrajectory& addSuffixWayPoint(const moveit::core::RobotStatePtr& state, double dt)
   {
+    const auto& state_prev = waypoints_.empty() ? state : waypoints_.back();
+
     state->update();
     waypoints_.push_back(state);
     duration_from_previous_.push_back(dt);
+
+    // calculate the distance from the previous waypoint
+    if (state_prev && isTipLinkSet())
+    {
+      try 
+      {
+        double distance = (state->getGlobalLinkTransform(tip_link_).translation() -
+                            state_prev->getGlobalLinkTransform(tip_link_).translation()).norm();
+        distance_from_previous_.push_back(distance);
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("RobotTrajectory"), "Error calculating distance: %s", e.what());
+      }
+    }
+
     return *this;
   }
 
@@ -209,9 +255,25 @@ public:
 
   RobotTrajectory& addPrefixWayPoint(const moveit::core::RobotStatePtr& state, double dt)
   {
+    const auto& state_prev = waypoints_.empty() ? state : waypoints_.back();
+
     state->update();
     waypoints_.push_front(state);
     duration_from_previous_.push_front(dt);
+
+    // calculate the distance from the previous waypoint
+    if (state_prev && isTipLinkSet())
+    {
+      try 
+      {
+        double distance = (state->getGlobalLinkTransform(tip_link_).translation() -
+                            state_prev->getGlobalLinkTransform(tip_link_).translation()).norm();
+        distance_from_previous_.push_front(distance);
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("RobotTrajectory"), "Error calculating distance: %s", e.what());
+      }
+    }
+
     return *this;
   }
 
@@ -222,9 +284,25 @@ public:
 
   RobotTrajectory& insertWayPoint(std::size_t index, const moveit::core::RobotStatePtr& state, double dt)
   {
+    const auto& state_prev = waypoints_.empty() ? state : waypoints_.back();
+
     state->update();
     waypoints_.insert(waypoints_.begin() + index, state);
     duration_from_previous_.insert(duration_from_previous_.begin() + index, dt);
+
+    // calculate the distance from the previous waypoint
+    if (state_prev && isTipLinkSet())
+    {
+      try 
+      {
+        double distance = (state->getGlobalLinkTransform(tip_link_).translation() -
+                            state_prev->getGlobalLinkTransform(tip_link_).translation()).norm();
+        distance_from_previous_.insert(distance_from_previous_.begin() + index, distance);
+      } catch (const std::exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("RobotTrajectory"), "Error calculating distance: %s", e.what());
+      }
+    }
+
     return *this;
   }
 
@@ -247,6 +325,9 @@ public:
   {
     waypoints_.clear();
     duration_from_previous_.clear();
+    if (isTipLinkSet()){
+      distance_from_previous_.clear();
+    }
     return *this;
   }
 
@@ -299,6 +380,14 @@ public:
    */
   void findWayPointIndicesForDurationAfterStart(const double& duration, int& before, int& after, double& blend) const;
 
+  /** @brief Finds the waypoint indices before and after an arc length from start.
+   *  @param The arc length from start.
+   *  @param The waypoint index before the supplied arc length.
+   *  @param The waypoint index after (or equal to) the supplied arc length.
+   *  @param The progress (0 to 1) between the two waypoints, based on distance (not based on time).
+   */
+  void findWayPointIndicesForArcDistanceAfterStart(const double& distance, int& before, int& after, double& blend) const;
+
   // TODO support visitor function for interpolation, or at least different types.
   /** @brief Gets a robot state corresponding to a supplied duration from start for the trajectory, using linear time
    * interpolation.
@@ -307,6 +396,14 @@ public:
    *  @return True if state is valid, false otherwise (trajectory is empty).
    */
   bool getStateAtDurationFromStart(const double request_duration, moveit::core::RobotStatePtr& output_state) const;
+
+  /** @brief Gets a robot state corresponding to a supplied arc length from start for the trajectory, using linear time
+   * interpolation.
+   *  @param The arc length from start.
+   *  @param The resulting robot state.
+   *  @return True if state is valid, false otherwise (trajectory is empty).
+   */
+  bool getStateAtArcDistanceFromStart(const double request_length, moveit::core::RobotStatePtr& output_state) const;
 
   class Iterator
   {
@@ -382,6 +479,8 @@ private:
   const moveit::core::JointModelGroup* group_;
   std::deque<moveit::core::RobotStatePtr> waypoints_;
   std::deque<double> duration_from_previous_;
+  std::deque<double> distance_from_previous_;
+  std::string tip_link_;
   rclcpp::Clock clock_ros_;
 };
 

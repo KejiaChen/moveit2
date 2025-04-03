@@ -48,19 +48,37 @@
 namespace robot_trajectory
 {
 RobotTrajectory::RobotTrajectory(const moveit::core::RobotModelConstPtr& robot_model)
-  : robot_model_(robot_model), group_(nullptr)
+  : robot_model_(robot_model), group_(nullptr), tip_link_("")
 {
+  if (!isTipLinkSet())
+  {
+    RCLCPP_WARN(rclcpp::get_logger("RobotTrajectory"), "Tip link is not set.");
+  }else{
+    RCLCPP_INFO(rclcpp::get_logger("RobotTrajectory"), "Tip link is set.");
+  }
 }
 
 RobotTrajectory::RobotTrajectory(const moveit::core::RobotModelConstPtr& robot_model, const std::string& group)
-  : robot_model_(robot_model), group_(group.empty() ? nullptr : robot_model->getJointModelGroup(group))
+  : robot_model_(robot_model), group_(group.empty() ? nullptr : robot_model->getJointModelGroup(group)), tip_link_("")
 {
+  if (!isTipLinkSet())
+  {
+    RCLCPP_WARN(rclcpp::get_logger("RobotTrajectory"), "Tip link is not set.");
+  }else{
+    RCLCPP_INFO(rclcpp::get_logger("RobotTrajectory"), "Tip link is set.");
+  }
 }
 
 RobotTrajectory::RobotTrajectory(const moveit::core::RobotModelConstPtr& robot_model,
                                  const moveit::core::JointModelGroup* group)
-  : robot_model_(robot_model), group_(group)
+  : robot_model_(robot_model), group_(group), tip_link_("")
 {
+  if (!isTipLinkSet())
+  {
+    RCLCPP_WARN(rclcpp::get_logger("RobotTrajectory"), "Tip link is not set.");
+  }else{
+    RCLCPP_INFO(rclcpp::get_logger("RobotTrajectory"), "Tip link is set.");
+  }
 }
 
 RobotTrajectory::RobotTrajectory(const RobotTrajectory& other, bool deepcopy)
@@ -82,6 +100,16 @@ const std::string& RobotTrajectory::getGroupName() const
     return group_->getName();
   static const std::string EMPTY;
   return EMPTY;
+}
+
+
+const std::string& RobotTrajectory::getTipLink() const
+{
+  if (isTipLinkSet()){
+    static const std::string EMPTY;
+    return EMPTY;
+  }
+  return tip_link_;
 }
 
 double RobotTrajectory::getDuration() const
@@ -118,6 +146,7 @@ void RobotTrajectory::swap(RobotTrajectory& other)
   std::swap(group_, other.group_);
   waypoints_.swap(other.waypoints_);
   duration_from_previous_.swap(other.duration_from_previous_);
+  distance_from_previous_.swap(other.distance_from_previous_);
 }
 
 RobotTrajectory& RobotTrajectory::append(const RobotTrajectory& source, double dt, size_t start_index, size_t end_index)
@@ -490,6 +519,46 @@ void RobotTrajectory::findWayPointIndicesForDurationAfterStart(const double& dur
     blend = (duration - before_time) / duration_from_previous_[index];
 }
 
+void RobotTrajectory::findWayPointIndicesForArcDistanceAfterStart(const double& distance, int& before, int& after,
+                                                               double& blend) const
+{
+  std::size_t index = 0, num_points = waypoints_.size();
+
+  if (distance < 0.0)
+  {
+    before = 0;
+    after = 0;
+    blend = 0;
+    return;
+  }
+
+  if (distance >= distance_from_previous_.back())
+  {
+    before = num_points - 1;
+    after = num_points - 1;
+    blend = 1.0;
+    return;
+  }
+
+  // Find indices
+  double running_arcdist = 0.0;
+  for (; index < num_points; ++index)
+  {
+    running_arcdist += distance_from_previous_[index];
+    if (running_arcdist >= distance)
+      break;
+  }
+  before = std::max<int>(index - 1, 0);
+  after = std::min<int>(index, num_points - 1);
+
+  // Compute distance blend
+  double before_distance = running_arcdist - distance_from_previous_[index];
+  if (after == before)
+    blend = 1.0;
+  else
+    blend = (distance - before_distance) / distance_from_previous_[index];
+}
+
 double RobotTrajectory::getWayPointDurationFromStart(std::size_t index) const
 {
   if (duration_from_previous_.empty())
@@ -508,6 +577,19 @@ double RobotTrajectory::getWaypointDurationFromStart(std::size_t index) const
   return getWayPointDurationFromStart(index);
 }
 
+double RobotTrajectory::getWayPointDistaceFromStart(std::size_t index) const
+{
+  if (distance_from_previous_.empty())
+    return 0.0;
+  if (index >= distance_from_previous_.size())
+    index = distance_from_previous_.size() - 1;
+
+  double distance = 0.0;
+  for (std::size_t i = 0; i <= index; ++i)
+    distance += distance_from_previous_[i];
+  return distance;
+}
+
 bool RobotTrajectory::getStateAtDurationFromStart(const double request_duration,
                                                   moveit::core::RobotStatePtr& output_state) const
 {
@@ -518,6 +600,22 @@ bool RobotTrajectory::getStateAtDurationFromStart(const double request_duration,
   int before = 0, after = 0;
   double blend = 1.0;
   findWayPointIndicesForDurationAfterStart(request_duration, before, after, blend);
+  // ROS_DEBUG_NAMED("robot_trajectory", "Interpolating %.3f of the way between index %d and %d.", blend, before,
+  // after);
+  waypoints_[before]->interpolate(*waypoints_[after], blend, *output_state);
+  return true;
+}
+
+bool RobotTrajectory::getStateAtArcDistanceFromStart(const double request_length,
+                                                  moveit::core::RobotStatePtr& output_state) const
+{
+  // If there are no waypoints we can't do anything
+  if (getWayPointCount() == 0)
+    return false;
+
+  int before = 0, after = 0;
+  double blend = 1.0;
+  findWayPointIndicesForArcDistanceAfterStart(request_length, before, after, blend);
   // ROS_DEBUG_NAMED("robot_trajectory", "Interpolating %.3f of the way between index %d and %d.", blend, before,
   // after);
   waypoints_[before]->interpolate(*waypoints_[after], blend, *output_state);
@@ -558,6 +656,10 @@ void RobotTrajectory::print(std::ostream& out, std::vector<int> variable_indexes
     const moveit::core::RobotState& point = getWayPoint(p_i);
     out << "  waypoint " << std::setw(3) << p_i;
     out << " time " << std::setw(5) << getWayPointDurationFromStart(p_i);
+    if (isTipLinkSet())
+    {
+      out << " distance " << std::setw(5) << getWayPointDistaceFromStart(p_i);
+    }
     out << " pos ";
     for (int index : variable_indexes)
     {
