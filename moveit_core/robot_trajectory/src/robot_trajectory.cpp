@@ -522,6 +522,7 @@ void RobotTrajectory::findWayPointIndicesForDurationAfterStart(const double& dur
 void RobotTrajectory::findWayPointIndicesForArcDistanceAfterStart(const double& distance, int& before, int& after,
                                                                double& blend) const
 {
+  // RCLCPP_WARN(rclcpp::get_logger("RobotTrajectory"), "findWayPointIndicesForArcDistanceAfterStart called with distance %f", distance);
   std::size_t index = 0, num_points = waypoints_.size();
 
   if (distance < 0.0)
@@ -532,7 +533,9 @@ void RobotTrajectory::findWayPointIndicesForArcDistanceAfterStart(const double& 
     return;
   }
 
-  if (distance >= distance_from_previous_.back())
+  double total_distance = getWayPointDistanceFromStart(num_points);
+
+  if (distance >= total_distance)
   {
     before = num_points - 1;
     after = num_points - 1;
@@ -548,6 +551,9 @@ void RobotTrajectory::findWayPointIndicesForArcDistanceAfterStart(const double& 
     if (running_arcdist >= distance)
       break;
   }
+  // RCLCPP_WARN(rclcpp::get_logger("RobotTrajectory"), "Found index %d, distance %f, running_arcdist %f", index, distance,
+  //                           running_arcdist);
+
   before = std::max<int>(index - 1, 0);
   after = std::min<int>(index, num_points - 1);
 
@@ -577,7 +583,7 @@ double RobotTrajectory::getWaypointDurationFromStart(std::size_t index) const
   return getWayPointDurationFromStart(index);
 }
 
-double RobotTrajectory::getWayPointDistaceFromStart(std::size_t index) const
+double RobotTrajectory::getWayPointDistanceFromStart(std::size_t index) const
 {
   if (distance_from_previous_.empty())
     return 0.0;
@@ -616,9 +622,9 @@ bool RobotTrajectory::getStateAtArcDistanceFromStart(const double request_length
   int before = 0, after = 0;
   double blend = 1.0;
   findWayPointIndicesForArcDistanceAfterStart(request_length, before, after, blend);
-  // ROS_DEBUG_NAMED("robot_trajectory", "Interpolating %.3f of the way between index %d and %d.", blend, before,
-  // after);
+  // RCLCPP_WARN(rclcpp::get_logger("RobotTrajectory"), "Interpolating %.3f of the way between index %d and %d.", blend, before, after);
   waypoints_[before]->interpolate(*waypoints_[after], blend, *output_state);
+  // RCLCPP_WARN(rclcpp::get_logger("RobotTrajectory"), "Interpolated state with distance %f", output_state->distance(*waypoints_[after]));
   return true;
 }
 
@@ -658,7 +664,7 @@ void RobotTrajectory::print(std::ostream& out, std::vector<int> variable_indexes
     out << " time " << std::setw(5) << getWayPointDurationFromStart(p_i);
     if (isTipLinkSet())
     {
-      out << " distance " << std::setw(5) << getWayPointDistaceFromStart(p_i);
+      out << " distance " << std::setw(5) << getWayPointDistanceFromStart(p_i);
     }
     out << " pos ";
     for (int index : variable_indexes)

@@ -119,6 +119,8 @@ public:
       distance_from_previous_.push_back(distance);
     }
 
+    RCLCPP_INFO(rclcpp::get_logger("RobotTrajectory"), "Tip link set to: %s", tip_link_.c_str());
+
     // assert distance_from_previous_ has the same size as duration_from_previous_
     return distance_from_previous_.size() == duration_from_previous_.size();
   }
@@ -185,7 +187,7 @@ public:
    *  @param  The waypoint index.
    *  @return The distance from start; returns overall distance if index is out of range.
    */
-  double getWayPointDistaceFromStart(std::size_t index) const;
+  double getWayPointDistanceFromStart(std::size_t index) const;
 
 
   double getWayPointDurationFromPrevious(std::size_t index) const
