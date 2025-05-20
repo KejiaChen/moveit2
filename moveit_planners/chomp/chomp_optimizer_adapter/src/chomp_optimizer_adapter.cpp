@@ -176,12 +176,31 @@ public:
                     const planning_interface::MotionPlanRequest& req, planning_interface::MotionPlanResponse& res,
                     std::vector<std::size_t>& /*added_path_index*/) const override
   {
-    RCLCPP_DEBUG(LOGGER, "CHOMP: adaptAndPlan ...");
+    RCLCPP_INFO(LOGGER, "CHOMP: adaptAndPlan ...");
 
-    // following call to planner() calls the OMPL planner and stores the trajectory inside the MotionPlanResponse res
-    // variable which is then used by CHOMP for optimization of the computed trajectory
-    if (!planner(ps, req, res))
+    RCLCPP_INFO(LOGGER, "CHOMP: adaptAndPlan: reference trajectory provided. Skipping first planning...");
+    auto jmg = ps->getRobotModel()->getJointModelGroup(req.group_name);
+    if (!jmg)
+    {
+      RCLCPP_ERROR(LOGGER, "CHOMP: Invalid group name: %s", req.group_name.c_str());
+      res.error_code_.val = moveit_msgs::msg::MoveItErrorCodes::INVALID_GROUP_NAME;
       return false;
+    }
+
+    robot_trajectory::RobotTrajectoryPtr ref_traj = std::make_shared<robot_trajectory::RobotTrajectory>(ps->getRobotModel(), jmg);
+    if (req.reference_trajectories.size() > 0) // if a reference trajectory is provided, we skip the first planning step
+    {
+      moveit_msgs::msg::RobotTrajectory ref_trajectory_msg;
+      ref_trajectory_msg.joint_trajectory = req.reference_trajectories[0].joint_trajectory[0];
+      ref_traj->setRobotTrajectoryMsg(ps->getCurrentState(), ref_trajectory_msg);
+    }else{
+      RCLCPP_INFO(LOGGER, "CHOMP: adaptAndPlan: NO reference trajectory provided. Planning...");
+
+      // following call to planner() calls the OMPL planner and stores the trajectory inside the MotionPlanResponse res
+      // variable which is then used by CHOMP for optimization of the computed trajectory
+      if (!planner(ps, req, res))
+      return false;
+    }
 
     // create a hybrid collision detector to set the collision checker as hybrid
     collision_detection::CollisionDetectorAllocatorPtr hybrid_cd(
@@ -194,7 +213,13 @@ public:
 
     chomp::ChompPlanner chomp_planner;
     planning_interface::MotionPlanDetailedResponse res_detailed;
-    res_detailed.trajectory_.push_back(res.trajectory_);
+    if (ref_traj->getWayPointCount() > 0){
+      res_detailed.trajectory_.push_back(ref_traj);
+      RCLCPP_INFO(LOGGER, "CHOMP: adaptAndPlan: set reference trajectory from request.");
+    }else{
+      res_detailed.trajectory_.push_back(res.trajectory_);
+      RCLCPP_INFO(LOGGER, "CHOMP: adaptAndPlan: set reference trajectory from former planning response.");
+    }
 
     bool planning_success = chomp_planner.solve(planning_scene, req, params_, res_detailed);
 

@@ -242,11 +242,16 @@ bool planning_pipeline::PlanningPipeline::generatePlan(const planning_scene::Pla
                                                        planning_interface::MotionPlanResponse& res,
                                                        std::vector<std::size_t>& adapter_added_state_index) const
 {
+  RCLCPP_INFO(LOGGER, "Generating plan for group '%s'", req.group_name.c_str());
   // broadcast the request we are about to work on, if needed
   if (publish_received_requests_)
-    received_request_publisher_->publish(req);
+    {
+      RCLCPP_INFO(LOGGER, "Publishing received request ");
+      received_request_publisher_->publish(req);
+    }
+    
   adapter_added_state_index.clear();
-
+  
   if (!planner_instance_)
   {
     RCLCPP_ERROR(LOGGER, "No planning plugin loaded. Cannot plan.");
@@ -258,7 +263,14 @@ bool planning_pipeline::PlanningPipeline::generatePlan(const planning_scene::Pla
   {
     if (adapter_chain_)
     {
-      solved = adapter_chain_->adaptAndPlan(planner_instance_, planning_scene, req, res, adapter_added_state_index);
+      if (req.reference_trajectories.size() > 0)
+      {
+        RCLCPP_INFO(LOGGER, "Using reference trajectory");
+        solved = adapter_chain_->adaptAndPlan(planner_instance_, planning_scene, req, res, adapter_added_state_index);
+      }else{
+        RCLCPP_INFO(LOGGER, "Using planning adapters");
+        solved = adapter_chain_->adaptAndPlan(planner_instance_, planning_scene, req, res, adapter_added_state_index);
+      }
       if (!adapter_added_state_index.empty())
       {
         std::stringstream ss;
@@ -269,6 +281,7 @@ bool planning_pipeline::PlanningPipeline::generatePlan(const planning_scene::Pla
     }
     else
     {
+      RCLCPP_INFO(LOGGER, "No planning adapters. Using planner directly");
       planning_interface::PlanningContextPtr context =
           planner_instance_->getPlanningContext(planning_scene, req, res.error_code_);
       solved = context ? context->solve(res) : false;
