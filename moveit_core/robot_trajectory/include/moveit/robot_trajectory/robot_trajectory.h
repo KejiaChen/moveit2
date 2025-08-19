@@ -107,22 +107,56 @@ public:
   }
 
 
-  bool setTipLink(const std::string& tip_link) {
+  bool setTipLink(const std::string& tip_link, 
+                  const Eigen::Isometry3d hand_to_tcp_transform = []{
+                    Eigen::Isometry3d t = Eigen::Isometry3d::Identity();
+                    t.translation().z() = 0.1034;
+                    return t;
+                }(),
+                  double rotation_weight=0.05) {
     tip_link_ = tip_link;
+    rotation_weight_ = rotation_weight;
+    hand_to_tcp_transform_ = hand_to_tcp_transform;
 
     // calculate the distance from the previous waypoint for existing waypoints
+    ee_positions_.clear();
     distance_from_previous_.clear();
-    distance_from_previous_.push_back(0.0);
-    for (std::size_t i = 1; i < waypoints_.size(); ++i)
+    for (std::size_t i = 0; i < waypoints_.size(); ++i)
     {
-      double distance = (waypoints_[i]->getGlobalLinkTransform(tip_link_).translation()- waypoints_[i-1]->getGlobalLinkTransform(tip_link_).translation()).norm();
+      Eigen::Isometry3d tcp_transform = waypoints_[i]->getGlobalLinkTransform(tip_link_) * hand_to_tcp_transform_;
+      ee_positions_.push_back(tcp_transform.translation());
+
+      if (i == 0){ 
+        distance_from_previous_.push_back(0.0);
+        continue;  // skip the first waypoint, as it has no previous waypoint
+      }
+        
+      Eigen::Isometry3d tcp_prev_transform = waypoints_[i-1]->getGlobalLinkTransform(tip_link_) * hand_to_tcp_transform_;
+      double position_distance = (tcp_transform.translation() - tcp_prev_transform.translation()).norm();
+
+      Eigen::Quaterniond q1(tcp_transform.rotation());
+      Eigen::Quaterniond q2(tcp_prev_transform.rotation());
+      double rotation_distance = q1.angularDistance(q2);
+
+      double distance = position_distance + rotation_weight_ * rotation_distance;
       distance_from_previous_.push_back(distance);
     }
 
     RCLCPP_INFO(rclcpp::get_logger("RobotTrajectory"), "Tip link set to: %s", tip_link_.c_str());
 
-    // assert distance_from_previous_ has the same size as duration_from_previous_
-    return distance_from_previous_.size() == duration_from_previous_.size();
+    if (ee_positions_.size() != waypoints_.size())
+    {
+      RCLCPP_ERROR(rclcpp::get_logger("RobotTrajectory"), "Error: ee_positions_ size does not match waypoints_ size");
+      return false;
+    }
+
+    if (distance_from_previous_.size() != waypoints_.size())
+    {
+      RCLCPP_ERROR(rclcpp::get_logger("RobotTrajectory"), "Error: distance_from_previous_ size does not match waypoints_ size");
+      return false;
+    }
+
+    return true;
   }
 
   bool isTipLinkSet() const {
@@ -138,6 +172,11 @@ public:
   {
     assert(waypoints_.size() == duration_from_previous_.size());
     return waypoints_.size();
+  }
+
+  std::tuple<std::size_t, std::size_t, std::size_t, std::size_t> debug_sizes() const
+  {
+    return {waypoints_.size(), duration_from_previous_.size(), distance_from_previous_.size(), ee_positions_.size()};
   }
 
   const moveit::core::RobotState& getWayPoint(std::size_t index) const
@@ -187,8 +226,9 @@ public:
    *  @param  The waypoint index.
    *  @return The distance from start; returns overall distance if index is out of range.
    */
-  double getWayPointDistanceFromStart(std::size_t index) const;
+  double getWayPointArcDistanceFromStart(std::size_t index) const;
 
+  Eigen::Vector3d getWayPointPosition(std::size_t index) const;
 
   double getWayPointDurationFromPrevious(std::size_t index) const
   {
@@ -239,8 +279,17 @@ public:
     {
       try 
       {
-        double distance = (state->getGlobalLinkTransform(tip_link_).translation() -
+        ee_positions_.push_back(state->getGlobalLinkTransform(tip_link_).translation());
+
+        double position_distance = (state->getGlobalLinkTransform(tip_link_).translation() -
                             state_prev->getGlobalLinkTransform(tip_link_).translation()).norm();
+        
+        Eigen::Quaterniond q1(state->getGlobalLinkTransform(tip_link_).rotation());
+        Eigen::Quaterniond q2(state_prev->getGlobalLinkTransform(tip_link_).rotation());
+        double rotation_distance = q1.angularDistance(q2);
+
+        double distance = position_distance + rotation_weight_ * rotation_distance;
+                            
         distance_from_previous_.push_back(distance);
       } catch (const std::exception& e) {
         RCLCPP_ERROR(rclcpp::get_logger("RobotTrajectory"), "Error calculating distance: %s", e.what());
@@ -268,8 +317,15 @@ public:
     {
       try 
       {
-        double distance = (state->getGlobalLinkTransform(tip_link_).translation() -
+        double position_distance = (state->getGlobalLinkTransform(tip_link_).translation() -
                             state_prev->getGlobalLinkTransform(tip_link_).translation()).norm();
+
+        Eigen::Quaterniond q1(state->getGlobalLinkTransform(tip_link_).rotation());
+        Eigen::Quaterniond q2(state_prev->getGlobalLinkTransform(tip_link_).rotation());
+        double rotation_distance = q1.angularDistance(q2);
+
+        double distance = position_distance + rotation_weight_ * rotation_distance;
+        
         distance_from_previous_.push_front(distance);
       } catch (const std::exception& e) {
         RCLCPP_ERROR(rclcpp::get_logger("RobotTrajectory"), "Error calculating distance: %s", e.what());
@@ -297,8 +353,18 @@ public:
     {
       try 
       {
-        double distance = (state->getGlobalLinkTransform(tip_link_).translation() -
+        ee_positions_.insert(ee_positions_.begin() + index,
+                             state->getGlobalLinkTransform(tip_link_).translation());
+
+        double position_distance = (state->getGlobalLinkTransform(tip_link_).translation() -
                             state_prev->getGlobalLinkTransform(tip_link_).translation()).norm();
+
+        Eigen::Quaterniond q1(state->getGlobalLinkTransform(tip_link_).rotation());
+        Eigen::Quaterniond q2(state_prev->getGlobalLinkTransform(tip_link_).rotation());
+        double rotation_distance = q1.angularDistance(q2);
+
+        double distance = position_distance + rotation_weight_ * rotation_distance;
+        
         distance_from_previous_.insert(distance_from_previous_.begin() + index, distance);
       } catch (const std::exception& e) {
         RCLCPP_ERROR(rclcpp::get_logger("RobotTrajectory"), "Error calculating distance: %s", e.what());
@@ -328,6 +394,7 @@ public:
     waypoints_.clear();
     duration_from_previous_.clear();
     if (isTipLinkSet()){
+      ee_positions_.clear();
       distance_from_previous_.clear();
     }
     return *this;
@@ -390,6 +457,16 @@ public:
    */
   void findWayPointIndicesForArcDistanceAfterStart(const double& distance, int& before, int& after, double& blend) const;
 
+  /** @brief Finds the waypoint indices before and after an arc length from start.
+   *  @param The 3D position of Endeffector in the trajectory as a 3D vector.
+   *  @param The waypoint index before the supplied arc length.
+   *  @param The waypoint index after (or equal to) the supplied arc length.
+   *  @param The progress (0 to 1) between the two waypoints, based on distance (not based on time).
+   *  @param The index of the first waypoint to be considered for the search.
+   */
+  void findWayPointIndicesForPosition(const Eigen::Vector3d& position, int& before, int& after,
+                                       double& blend, int& start_index) const;
+
   // TODO support visitor function for interpolation, or at least different types.
   /** @brief Gets a robot state corresponding to a supplied duration from start for the trajectory, using linear time
    * interpolation.
@@ -399,13 +476,24 @@ public:
    */
   bool getStateAtDurationFromStart(const double request_duration, moveit::core::RobotStatePtr& output_state) const;
 
-  /** @brief Gets a robot state corresponding to a supplied arc length from start for the trajectory, using linear time
+  /** @brief Gets a robot state corresponding to a supplied arc length from start for the trajectory, using linear
    * interpolation.
    *  @param The arc length from start.
    *  @param The resulting robot state.
    *  @return True if state is valid, false otherwise (trajectory is empty).
    */
   bool getStateAtArcDistanceFromStart(const double request_length, moveit::core::RobotStatePtr& output_state) const;
+  
+  /** @brief Gets a robot state corresponding to a supplied 3D position from start for the trajectory, using linear
+   * interpolation.
+   *  @param The position of Endeffector in the trajectory as a 3D vector.
+   *  @param The resulting robot state.
+   *  @param The index of the first waypoint to be considered for the search.
+   *  @return True if state is valid, false otherwise (trajectory is empty).
+   */
+
+  bool getStateAtPosition(const Eigen::Vector3d& request_position, moveit::core::RobotStatePtr& output_state, int start_index,
+                          int& before, int& after, double& blend) const;
 
   class Iterator
   {
@@ -482,7 +570,10 @@ private:
   std::deque<moveit::core::RobotStatePtr> waypoints_;
   std::deque<double> duration_from_previous_;
   std::deque<double> distance_from_previous_;
+  std::deque<Eigen::Vector3d> ee_positions_;
   std::string tip_link_;
+  Eigen::Isometry3d hand_to_tcp_transform_;
+  double rotation_weight_;
   rclcpp::Clock clock_ros_;
 };
 

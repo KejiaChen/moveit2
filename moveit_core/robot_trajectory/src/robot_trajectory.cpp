@@ -48,7 +48,7 @@
 namespace robot_trajectory
 {
 RobotTrajectory::RobotTrajectory(const moveit::core::RobotModelConstPtr& robot_model)
-  : robot_model_(robot_model), group_(nullptr), tip_link_("")
+  : robot_model_(robot_model), group_(nullptr), tip_link_(""), rotation_weight_(0.05)
 {
   if (!isTipLinkSet())
   {
@@ -59,7 +59,7 @@ RobotTrajectory::RobotTrajectory(const moveit::core::RobotModelConstPtr& robot_m
 }
 
 RobotTrajectory::RobotTrajectory(const moveit::core::RobotModelConstPtr& robot_model, const std::string& group)
-  : robot_model_(robot_model), group_(group.empty() ? nullptr : robot_model->getJointModelGroup(group)), tip_link_("")
+  : robot_model_(robot_model), group_(group.empty() ? nullptr : robot_model->getJointModelGroup(group)), tip_link_(""), rotation_weight_(0.05)
 {
   if (!isTipLinkSet())
   {
@@ -71,7 +71,7 @@ RobotTrajectory::RobotTrajectory(const moveit::core::RobotModelConstPtr& robot_m
 
 RobotTrajectory::RobotTrajectory(const moveit::core::RobotModelConstPtr& robot_model,
                                  const moveit::core::JointModelGroup* group)
-  : robot_model_(robot_model), group_(group), tip_link_("")
+  : robot_model_(robot_model), group_(group), tip_link_(""), rotation_weight_(0.05)
 {
   if (!isTipLinkSet())
   {
@@ -179,6 +179,12 @@ RobotTrajectory& RobotTrajectory::reverse()
     duration_from_previous_.push_back(duration_from_previous_.front());
     std::reverse(duration_from_previous_.begin(), duration_from_previous_.end());
     duration_from_previous_.pop_back();
+  }
+
+  if (isTipLinkSet() && !distance_from_previous_.empty()){
+    distance_from_previous_.push_back(distance_from_previous_.front());
+    std::reverse(distance_from_previous_.begin(), distance_from_previous_.end());
+    distance_from_previous_.pop_back();
   }
 
   return *this;
@@ -533,7 +539,7 @@ void RobotTrajectory::findWayPointIndicesForArcDistanceAfterStart(const double& 
     return;
   }
 
-  double total_distance = getWayPointDistanceFromStart(num_points);
+  double total_distance = getWayPointArcDistanceFromStart(num_points);
 
   if (distance >= total_distance)
   {
@@ -565,6 +571,70 @@ void RobotTrajectory::findWayPointIndicesForArcDistanceAfterStart(const double& 
     blend = (distance - before_distance) / distance_from_previous_[index];
 }
 
+void RobotTrajectory::findWayPointIndicesForPosition(const Eigen::Vector3d& position, int& before, int& after,
+                                                       double& blend, int& start_index) const
+{
+  // Find indices
+  std::size_t num_points = waypoints_.size();
+  double eps = 1e-12;
+  Eigen::Vector3d projected_point_on_segment;
+  double best_err = std::numeric_limits<double>::max();
+  bool found_valid = false;
+
+  for (std::size_t index = start_index; index < num_points-1; ++index)
+  {  
+    Eigen::Vector3d segment_start = getWayPointPosition(index);
+    Eigen::Vector3d segment_end = getWayPointPosition(index + 1);
+
+    // Compute segment vector
+    Eigen::Vector3d segment_vector = segment_end - segment_start;
+
+    // Compute vector from segment_start to position
+    Eigen::Vector3d to_position = position - segment_start;
+    
+    double blend_candidate = 0.0;
+    double segment_length_squared = segment_vector.squaredNorm();
+
+    if (segment_length_squared < eps){ // zero-length segment: treat as point
+      blend_candidate = 0.0;
+      projected_point_on_segment = segment_start;
+    }else{
+      blend_candidate = (to_position.dot(segment_vector)) / segment_length_squared;
+
+      // if ((blend_candidate < 0.0) || (blend_candidate > 1.0)){
+      //   continue;
+      // }
+      if (blend_candidate < 0.0) blend_candidate = 0.0;
+      else if (blend_candidate > 1.0) blend_candidate = 1.0;
+      projected_point_on_segment =  segment_start + blend_candidate * segment_vector;
+    }
+
+    double position_err = (position - projected_point_on_segment).squaredNorm();
+
+    if (position_err < best_err)
+    {
+      best_err = position_err;
+      before = std::max<int>(index, 0);
+      after = std::min<int>(index + 1, num_points - 1);
+      blend = blend_candidate;
+      found_valid = true;
+    }
+  }
+
+  if (!found_valid)
+  {
+    RCLCPP_INFO_STREAM(rclcpp::get_logger("RobotTrajectory"), "No valid interpolation found for position: " << position.transpose() <<" resulting blend: " << blend);
+    blend = -1.0;
+    before = -1;
+    after = -1;
+  }
+
+  RCLCPP_INFO_STREAM(rclcpp::get_logger("RobotTrajectory"), "Interpolating for position "
+                                                                 << position.transpose()  << " with blend:" << blend << " between index "
+                                                                 << before << " and " << after << " with error " << best_err);
+}
+
+
 double RobotTrajectory::getWayPointDurationFromStart(std::size_t index) const
 {
   if (duration_from_previous_.empty())
@@ -583,7 +653,7 @@ double RobotTrajectory::getWaypointDurationFromStart(std::size_t index) const
   return getWayPointDurationFromStart(index);
 }
 
-double RobotTrajectory::getWayPointDistanceFromStart(std::size_t index) const
+double RobotTrajectory::getWayPointArcDistanceFromStart(std::size_t index) const
 {
   if (distance_from_previous_.empty())
     return 0.0;
@@ -594,6 +664,16 @@ double RobotTrajectory::getWayPointDistanceFromStart(std::size_t index) const
   for (std::size_t i = 0; i <= index; ++i)
     distance += distance_from_previous_[i];
   return distance;
+}
+
+Eigen::Vector3d RobotTrajectory::getWayPointPosition(std::size_t index) const
+{
+  if (ee_positions_.empty())
+    return Eigen::Vector3d::Zero();
+  if (index >= ee_positions_.size())
+    index = ee_positions_.size() - 1;
+
+  return ee_positions_[index];
 }
 
 bool RobotTrajectory::getStateAtDurationFromStart(const double request_duration,
@@ -622,6 +702,31 @@ bool RobotTrajectory::getStateAtArcDistanceFromStart(const double request_length
   int before = 0, after = 0;
   double blend = 1.0;
   findWayPointIndicesForArcDistanceAfterStart(request_length, before, after, blend);
+  // RCLCPP_WARN(rclcpp::get_logger("RobotTrajectory"), "Interpolating %.3f of the way between index %d and %d.", blend, before, after);
+  waypoints_[before]->interpolate(*waypoints_[after], blend, *output_state);
+  // RCLCPP_WARN(rclcpp::get_logger("RobotTrajectory"), "Interpolated state with distance %f", output_state->distance(*waypoints_[after]));
+  return true;
+}
+
+bool RobotTrajectory::getStateAtPosition(const Eigen::Vector3d& request_position, moveit::core::RobotStatePtr& output_state, int start_index,
+                                        int& before, int& after, double& blend) const
+{
+  if (getWayPointCount() == 0)
+  {
+    RCLCPP_WARN_STREAM(rclcpp::get_logger("RobotTrajectory"), "No waypoints available to interpolate position: " << request_position.transpose());
+    return false;
+  }
+
+  // int before = 0, after = 0;
+  // double blend = 1.0;
+  
+  RCLCPP_INFO_STREAM(rclcpp::get_logger("RobotTrajectory"), "Requesting position: " << request_position.transpose() << " with start index: " << start_index);
+  findWayPointIndicesForPosition(request_position, before, after, blend, start_index);
+  if (blend < 0.0)
+  {
+    RCLCPP_WARN_STREAM(rclcpp::get_logger("RobotTrajectory"), "No valid interpolation found for position: " << request_position.transpose());
+    return false;
+  }
   // RCLCPP_WARN(rclcpp::get_logger("RobotTrajectory"), "Interpolating %.3f of the way between index %d and %d.", blend, before, after);
   waypoints_[before]->interpolate(*waypoints_[after], blend, *output_state);
   // RCLCPP_WARN(rclcpp::get_logger("RobotTrajectory"), "Interpolated state with distance %f", output_state->distance(*waypoints_[after]));
@@ -664,7 +769,7 @@ void RobotTrajectory::print(std::ostream& out, std::vector<int> variable_indexes
     out << " time " << std::setw(5) << getWayPointDurationFromStart(p_i);
     if (isTipLinkSet())
     {
-      out << " distance " << std::setw(5) << getWayPointDistanceFromStart(p_i);
+      out << " distance " << std::setw(5) << getWayPointArcDistanceFromStart(p_i);
     }
     out << " pos ";
     for (int index : variable_indexes)
