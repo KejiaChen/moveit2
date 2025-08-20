@@ -604,12 +604,22 @@ void RobotTrajectory::findWayPointIndicesForPosition(const Eigen::Vector3d& posi
       // if ((blend_candidate < 0.0) || (blend_candidate > 1.0)){
       //   continue;
       // }
-      if (blend_candidate < 0.0) blend_candidate = 0.0;
-      else if (blend_candidate > 1.0) blend_candidate = 1.0;
+      if (blend_candidate < 0.0) 
+      {
+          blend_candidate = 0.0;
+      }
+      else if (blend_candidate > 1.0) 
+      {
+          blend_candidate = 1.0;
+      }
       projected_point_on_segment =  segment_start + blend_candidate * segment_vector;
     }
 
     double position_err = (position - projected_point_on_segment).squaredNorm();
+
+    if (blend_candidate > 0.0 && blend_candidate < 1.0){
+      RCLCPP_INFO_STREAM(rclcpp::get_logger("RobotTrajectory"), "interpolating at j=" << index << " error < " << best_err << " with blend=" << std::setprecision(15) << blend_candidate);
+    }
 
     if (position_err < best_err)
     {
@@ -629,7 +639,7 @@ void RobotTrajectory::findWayPointIndicesForPosition(const Eigen::Vector3d& posi
     after = -1;
   }
 
-  RCLCPP_INFO_STREAM(rclcpp::get_logger("RobotTrajectory"), "Interpolating for position "
+  RCLCPP_INFO_STREAM(rclcpp::get_logger("RobotTrajectory"), "Chosen interpolation for position "
                                                                  << position.transpose()  << " with blend:" << blend << " between index "
                                                                  << before << " and " << after << " with error " << best_err);
 }
@@ -668,12 +678,12 @@ double RobotTrajectory::getWayPointArcDistanceFromStart(std::size_t index) const
 
 Eigen::Vector3d RobotTrajectory::getWayPointPosition(std::size_t index) const
 {
-  if (ee_positions_.empty())
+  if (tcp_positions_.empty())
     return Eigen::Vector3d::Zero();
-  if (index >= ee_positions_.size())
-    index = ee_positions_.size() - 1;
+  if (index >= tcp_positions_.size())
+    index = tcp_positions_.size() - 1;
 
-  return ee_positions_[index];
+  return tcp_positions_[index];
 }
 
 bool RobotTrajectory::getStateAtDurationFromStart(const double request_duration,
@@ -720,7 +730,7 @@ bool RobotTrajectory::getStateAtPosition(const Eigen::Vector3d& request_position
   // int before = 0, after = 0;
   // double blend = 1.0;
   
-  RCLCPP_INFO_STREAM(rclcpp::get_logger("RobotTrajectory"), "Requesting position: " << request_position.transpose() << " with start index: " << start_index);
+  // RCLCPP_INFO_STREAM(rclcpp::get_logger("RobotTrajectory"), "Requesting position: " << request_position.transpose() << " with start index: " << start_index);
   findWayPointIndicesForPosition(request_position, before, after, blend, start_index);
   if (blend < 0.0)
   {

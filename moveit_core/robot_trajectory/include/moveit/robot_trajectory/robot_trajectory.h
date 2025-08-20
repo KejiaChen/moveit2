@@ -108,34 +108,42 @@ public:
 
 
   bool setTipLink(const std::string& tip_link, 
-                  const Eigen::Isometry3d hand_to_tcp_transform = []{
+                  const std::string& base_link= "world",
+                  const Eigen::Isometry3d& hand_to_tcp_transform = []{
                     Eigen::Isometry3d t = Eigen::Isometry3d::Identity();
                     t.translation().z() = 0.1034;
                     return t;
                 }(),
                   double rotation_weight=0.05) {
     tip_link_ = tip_link;
+    base_link_ = base_link;
     rotation_weight_ = rotation_weight;
     hand_to_tcp_transform_ = hand_to_tcp_transform;
 
+    Eigen::Isometry3d robot_base_pose = waypoints_[0]->getGlobalLinkTransform(base_link_);
+
     // calculate the distance from the previous waypoint for existing waypoints
-    ee_positions_.clear();
+    tcp_positions_.clear();
     distance_from_previous_.clear();
     for (std::size_t i = 0; i < waypoints_.size(); ++i)
     {
-      Eigen::Isometry3d tcp_transform = waypoints_[i]->getGlobalLinkTransform(tip_link_) * hand_to_tcp_transform_;
-      ee_positions_.push_back(tcp_transform.translation());
+      Eigen::Isometry3d ee_pose_in_world = waypoints_[i]->getGlobalLinkTransform(tip_link_);
+      Eigen::Isometry3d ee_pose_in_base = robot_base_pose.inverse() * ee_pose_in_world;
+      Eigen::Isometry3d tcp_pose_in_base = ee_pose_in_base * hand_to_tcp_transform_;
+      tcp_positions_.push_back(tcp_pose_in_base.translation());
 
       if (i == 0){ 
         distance_from_previous_.push_back(0.0);
         continue;  // skip the first waypoint, as it has no previous waypoint
       }
-        
-      Eigen::Isometry3d tcp_prev_transform = waypoints_[i-1]->getGlobalLinkTransform(tip_link_) * hand_to_tcp_transform_;
-      double position_distance = (tcp_transform.translation() - tcp_prev_transform.translation()).norm();
+      
+      Eigen::Isometry3d ee_pose_prev_in_world = waypoints_[i-1]->getGlobalLinkTransform(tip_link_);
+      Eigen::Isometry3d ee_prev_pose_in_base = robot_base_pose.inverse() * ee_pose_prev_in_world;
+      Eigen::Isometry3d tcp_prev_pose_in_base = ee_prev_pose_in_base * hand_to_tcp_transform_;
+      double position_distance = (tcp_pose_in_base.translation() - tcp_prev_pose_in_base.translation()).norm();
 
-      Eigen::Quaterniond q1(tcp_transform.rotation());
-      Eigen::Quaterniond q2(tcp_prev_transform.rotation());
+      Eigen::Quaterniond q1(tcp_pose_in_base.rotation());
+      Eigen::Quaterniond q2(tcp_prev_pose_in_base.rotation());
       double rotation_distance = q1.angularDistance(q2);
 
       double distance = position_distance + rotation_weight_ * rotation_distance;
@@ -144,9 +152,9 @@ public:
 
     RCLCPP_INFO(rclcpp::get_logger("RobotTrajectory"), "Tip link set to: %s", tip_link_.c_str());
 
-    if (ee_positions_.size() != waypoints_.size())
+    if (tcp_positions_.size() != waypoints_.size())
     {
-      RCLCPP_ERROR(rclcpp::get_logger("RobotTrajectory"), "Error: ee_positions_ size does not match waypoints_ size");
+      RCLCPP_ERROR(rclcpp::get_logger("RobotTrajectory"), "Error: tcp_positions_ size does not match waypoints_ size");
       return false;
     }
 
@@ -176,7 +184,7 @@ public:
 
   std::tuple<std::size_t, std::size_t, std::size_t, std::size_t> debug_sizes() const
   {
-    return {waypoints_.size(), duration_from_previous_.size(), distance_from_previous_.size(), ee_positions_.size()};
+    return {waypoints_.size(), duration_from_previous_.size(), distance_from_previous_.size(), tcp_positions_.size()};
   }
 
   const moveit::core::RobotState& getWayPoint(std::size_t index) const
@@ -279,7 +287,7 @@ public:
     {
       try 
       {
-        ee_positions_.push_back(state->getGlobalLinkTransform(tip_link_).translation());
+        tcp_positions_.push_back(state->getGlobalLinkTransform(tip_link_).translation());
 
         double position_distance = (state->getGlobalLinkTransform(tip_link_).translation() -
                             state_prev->getGlobalLinkTransform(tip_link_).translation()).norm();
@@ -353,7 +361,7 @@ public:
     {
       try 
       {
-        ee_positions_.insert(ee_positions_.begin() + index,
+        tcp_positions_.insert(tcp_positions_.begin() + index,
                              state->getGlobalLinkTransform(tip_link_).translation());
 
         double position_distance = (state->getGlobalLinkTransform(tip_link_).translation() -
@@ -394,7 +402,7 @@ public:
     waypoints_.clear();
     duration_from_previous_.clear();
     if (isTipLinkSet()){
-      ee_positions_.clear();
+      tcp_positions_.clear();
       distance_from_previous_.clear();
     }
     return *this;
@@ -570,8 +578,9 @@ private:
   std::deque<moveit::core::RobotStatePtr> waypoints_;
   std::deque<double> duration_from_previous_;
   std::deque<double> distance_from_previous_;
-  std::deque<Eigen::Vector3d> ee_positions_;
+  std::deque<Eigen::Vector3d> tcp_positions_;
   std::string tip_link_;
+  std::string base_link_;
   Eigen::Isometry3d hand_to_tcp_transform_;
   double rotation_weight_;
   rclcpp::Clock clock_ros_;
